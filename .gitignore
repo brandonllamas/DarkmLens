@@ -6,6 +6,7 @@ out/*
 readme_copy.md
 # C extensions
 *.so
+app_funcional.py
 
 # Distribution / packaging
 .Python
