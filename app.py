@@ -10,13 +10,17 @@ import time
 import argparse
 import hashlib
 import warnings
+import threading
+import queue
 from dataclasses import dataclass
 from typing import Dict, List, Set, Optional, Any, Tuple
 from urllib.parse import urljoin, urlparse, parse_qs, urlencode, urlunparse
 
 import requests
+import urllib3
 from bs4 import BeautifulSoup
 from colorama import Fore, init
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Wappalyzer (opcional)
 try:
@@ -26,6 +30,9 @@ except Exception:
     HAS_WAPPALYZER = False
 
 init(autoreset=True)
+
+# Silence urllib3 InsecureRequestWarning (because verify=False is used)
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 
 # =============================
@@ -64,13 +71,6 @@ def normalize_url(u: str) -> str:
 def line_number_from_index(text: str, idx: int) -> int:
     return text.count("\n", 0, max(0, idx)) + 1
 
-def html_escape(s: str) -> str:
-    return (s.replace("&", "&amp;")
-             .replace("<", "&lt;")
-             .replace(">", "&gt;")
-             .replace('"', "&quot;")
-             .replace("'", "&#39;"))
-
 def summarize_headers(headers: Dict[str, str]) -> Dict[str, str]:
     keep = [
         "server", "via", "x-cache", "x-powered-by",
@@ -96,9 +96,6 @@ def extract_query_params(url: str) -> List[str]:
 
 def cap_list(lst: List[Any], n: int) -> List[Any]:
     return lst[:n] if len(lst) > n else lst
-
-def is_truthy_list(x) -> bool:
-    return isinstance(x, list) and len(x) > 0
 
 def is_probably_text(ct: str) -> bool:
     ct = (ct or "").lower()
@@ -137,20 +134,19 @@ class FetchResult:
 # =============================
 class DarkmLens:
     """
-    DarkmLens v4.2 (Darkmoon)
+    DarkmLens v4.3 (Darkmoon)
     - Defensive passive analysis (authorized only).
-    - Improvements:
-      * Better URL discovery & crawling (same-origin pages).
-      * Optional extra headers for authenticated crawling (HTTP + Playwright).
-      * Per-route access matrix + per-route screenshots.
-      * Deeper request inference (method + params + body hints for fetch/axios).
-      * JS navigation detection (window.location.href, assign, replace, pushState, router.push, navigate, etc.)
-      * AuthZ audit: visit discovered routes and classify "con acceso" / "sin acceso".
-      * Show per-route screenshot grid + badges in HTML report.
-      * Optional local AI summary using Ollama (if available) else heuristic summary (never blank).
+    - NEW in v4.3:
+      * Threading / parallel fetch:
+        - assets (JS/CSS)
+        - crawl (same-origin) using a work queue
+        - authz audit routes
+        - deep-endpoints scripts per visited HTML
+      * Thread-local requests session to avoid sharing Session across threads
+      * Extra CLI: --threads / --asset-threads / --crawl-threads / --authz-threads / --deep-threads
     """
 
-    VERSION = "4.2"
+    VERSION = "4.3"
 
     ABS_URL_RE = re.compile(r'https?://[^\s"\'<>]+(?:\?[^\s"\'<>]+)?', re.IGNORECASE)
 
@@ -222,21 +218,13 @@ class DarkmLens:
 
     # JS navigation discovery
     JS_NAV_RE = [
-        # window.location.href = "x"
         re.compile(r'(?:window\.)?location\.href\s*=\s*(?P<q>["\'])(?P<u>[^"\']+)(?P=q)', re.IGNORECASE),
-        # location.assign("x") / replace("x")
         re.compile(r'(?:window\.)?location\.(?:assign|replace)\s*\(\s*(?P<q>["\'])(?P<u>[^"\']+)(?P=q)\s*\)', re.IGNORECASE),
-        # history.pushState(..., "...", "/path")
         re.compile(r'history\.pushState\s*\(\s*.*?,\s*.*?,\s*(?P<q>["\'])(?P<u>[^"\']+)(?P=q)\s*\)', re.IGNORECASE),
         re.compile(r'history\.replaceState\s*\(\s*.*?,\s*.*?,\s*(?P<q>["\'])(?P<u>[^"\']+)(?P=q)\s*\)', re.IGNORECASE),
-
-        # Angular router.navigate(["/x", ...]) or navigateByUrl("/x")
         re.compile(r'router\.navigate(?:ByUrl)?\s*\(\s*(?P<arg>\[.*?\]|(?P<q>["\'])(?P<u>[^"\']+)(?P=q))', re.IGNORECASE | re.DOTALL),
-        # React Router navigate("/x")
         re.compile(r'\bnavigate\s*\(\s*(?P<q>["\'])(?P<u>\/[^"\']+)(?P=q)', re.IGNORECASE),
-        # Next/router router.push("/x") / replace("/x")
         re.compile(r'router\.(?:push|replace)\s*\(\s*(?P<q>["\'])(?P<u>\/[^"\']+)(?P=q)', re.IGNORECASE),
-        # window.open("/x")
         re.compile(r'window\.open\s*\(\s*(?P<q>["\'])(?P<u>[^"\']+)(?P=q)', re.IGNORECASE),
     ]
 
@@ -272,6 +260,16 @@ class DarkmLens:
         # Optional AI summary (Ollama)
         ai_ollama: bool = False,
         ai_model: str = "llama3.1:8b",
+
+        # NEW
+        deep_endpoints: bool = False,
+
+        # THREADS
+        threads: int = 12,
+        asset_threads: Optional[int] = None,
+        crawl_threads: Optional[int] = None,
+        authz_threads: Optional[int] = None,
+        deep_threads: Optional[int] = None,
     ):
         self.target_url = target_url
         self.out_dir = out_dir
@@ -296,6 +294,16 @@ class DarkmLens:
         self.ai_ollama = ai_ollama
         self.ai_model = ai_model
 
+        self.deep_endpoints = deep_endpoints
+        self.verbose = False  # set via CLI
+
+        # Thread controls
+        self.threads = max(1, int(threads))
+        self.asset_threads = max(1, int(asset_threads if asset_threads is not None else self.threads))
+        self.crawl_threads = max(1, int(crawl_threads if crawl_threads is not None else min(self.threads, 10)))
+        self.authz_threads = max(1, int(authz_threads if authz_threads is not None else min(self.threads, 20)))
+        self.deep_threads = max(1, int(deep_threads if deep_threads is not None else min(self.threads, 10)))
+
         safe_mkdir(self.out_dir)
         safe_mkdir(os.path.join(self.out_dir, "routes"))
         safe_mkdir(os.path.join(self.out_dir, "screens"))
@@ -304,15 +312,23 @@ class DarkmLens:
         self.template_path = os.path.join(self.out_dir, "report.template.html")
         self._ensure_template()
 
-        self.session = requests.Session()
-        base_headers = {
+        # Thread-local session
+        self._tls = threading.local()
+
+        self._results_lock = threading.Lock()
+        self._stats_lock = threading.Lock()
+        self._maps_lock = threading.Lock()
+        self._screens_lock = threading.Lock()
+
+        self._stop_event = threading.Event()
+
+        self.base_headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                           "AppleWebKit/537.36 (KHTML, like Gecko) "
                           "Chrome/122.0 Safari/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
         }
-        base_headers.update(self.extra_headers)
-        self.session.headers.update(base_headers)
+        self.base_headers.update(self.extra_headers)
 
         self.results: Dict[str, Any] = {
             "meta": {
@@ -381,18 +397,22 @@ class DarkmLens:
                 "routes": [],
             },
             "notes": [],
-            "stats": {"assets_fetched": 0, "maps_found": 0, "maps_fetched": 0, "pages_visited": 0, "authz_routes_tested": 0}
+            "stats": {
+                "assets_fetched": 0,
+                "maps_found": 0,
+                "maps_fetched": 0,
+                "pages_visited": 0,
+                "authz_routes_tested": 0
+            }
         }
 
     # -----------------------------
     # Template
     # -----------------------------
     def _ensure_template(self):
-        # If not exists, write a default template into out_dir so it is visible/editable
         if os.path.exists(self.template_path):
             return
-        default_template = DEFAULT_REPORT_TEMPLATE
-        write_text_file(self.template_path, default_template)
+        write_text_file(self.template_path, DEFAULT_REPORT_TEMPLATE)
 
     # -----------------------------
     # UI
@@ -402,19 +422,37 @@ class DarkmLens:
         print(f"{Fore.MAGENTA}   DarkmLens v{self.VERSION}  |  Darkmoon | Red Team Barranquilla")
         print(f"{Fore.CYAN}========================================")
         print(f"{Fore.YELLOW}Uso autorizado únicamente. Análisis pasivo.\n")
+        print(f"{Fore.CYAN}Threads: global={self.threads} assets={self.asset_threads} crawl={self.crawl_threads} authz={self.authz_threads} deep={self.deep_threads}\n")
+
+    # -----------------------------
+    # Thread-local session
+    # -----------------------------
+    def _get_session(self) -> requests.Session:
+        sess = getattr(self._tls, "session", None)
+        if sess is None:
+            sess = requests.Session()
+            sess.headers.update(self.base_headers)
+            self._tls.session = sess
+        return sess
 
     # -----------------------------
     # Network
     # -----------------------------
     def fetch(self, url: str) -> Optional[FetchResult]:
+        if self._stop_event.is_set():
+            return None
         try:
+            if self.verbose:
+                print(f"{Fore.CYAN}[fetch] {url}")
             t0 = time.time()
-            r = self.session.get(url, timeout=self.request_timeout, allow_redirects=True)
+            sess = self._get_session()
+            r = sess.get(url, timeout=self.request_timeout, allow_redirects=True, verify=False)
             elapsed_ms = int((time.time() - t0) * 1000)
             ct = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
             return FetchResult(url=r.url, status=r.status_code, content_type=ct, text=r.text or "", headers=dict(r.headers), elapsed_ms=elapsed_ms)
         except Exception as e:
-            self.results["notes"].append(f"Fetch error {url}: {e}")
+            with self._results_lock:
+                self.results["notes"].append(f"Fetch error {url}: {e}")
             return None
 
     # -----------------------------
@@ -422,7 +460,8 @@ class DarkmLens:
     # -----------------------------
     def identify_tech_wappalyzer(self):
         if not HAS_WAPPALYZER:
-            self.results["notes"].append("Wappalyzer no instalado (opcional).")
+            with self._results_lock:
+                self.results["notes"].append("Wappalyzer no instalado (opcional).")
             return
         print(f"[*] Identificando tecnologías (Wappalyzer) en {self.target_url}...")
         try:
@@ -431,34 +470,37 @@ class DarkmLens:
                 wappalyzer = Wappalyzer.latest()
                 webpage = WebPage.new_from_url(self.target_url)
                 techs = list(wappalyzer.analyze(webpage))
-                self.results["technologies"].extend(techs)
+                with self._results_lock:
+                    self.results["technologies"].extend(techs)
         except Exception as e:
-            self.results["notes"].append(f"Wappalyzer error: {e}")
+            with self._results_lock:
+                self.results["notes"].append(f"Wappalyzer error: {e}")
 
     def fingerprint_html_and_headers(self, html: str, headers: Dict[str, str]):
         fp: List[str] = []
         backend: List[str] = []
         fw: List[str] = []
 
-        hlow = html.lower()
+        hlow = (html or "").lower()
 
-        if "/_next/static/" in html or 'id="__NEXT_DATA__"' in html:
+        if "/_next/static/" in (html or "") or 'id="__NEXT_DATA__"' in (html or ""):
             fp.append("Next.js (heurístico)")
-            self.results["nextjs"]["detected"] = True
+            with self._results_lock:
+                self.results["nextjs"]["detected"] = True
 
-        if "data-reactroot" in html or "react" in hlow:
+        if "data-reactroot" in (html or "") or "react" in hlow:
             fp.append("React (heurístico)")
 
-        if "data-emotion" in html or "mui" in html:
+        if "data-emotion" in (html or "") or "mui" in (html or ""):
             fp.append("MUI/Emotion (heurístico)")
 
-        if self.ANGULAR_HINT_RE.search(html):
+        if self.ANGULAR_HINT_RE.search(html or ""):
             fw.append("Angular (heurístico)")
-        if self.VUE_HINT_RE.search(html):
+        if self.VUE_HINT_RE.search(html or ""):
             fw.append("Vue (heurístico)")
-        if self.SVELTE_HINT_RE.search(html):
+        if self.SVELTE_HINT_RE.search(html or ""):
             fw.append("Svelte (heurístico)")
-        if self.NUxT_HINT_RE.search(html):
+        if self.NUxT_HINT_RE.search(html or ""):
             fw.append("Nuxt (heurístico)")
 
         sec = []
@@ -492,15 +534,17 @@ class DarkmLens:
         if any(k.lower().startswith("x-amz-") for k in headers.keys()):
             fp.append("AWS x-amz-* headers")
 
-        self.results["fingerprints"].extend(fp)
-        self.results["backend_hints"].extend(backend)
-        self.results["framework_hints"].extend(fw)
+        with self._results_lock:
+            self.results["fingerprints"].extend(fp)
+            self.results["backend_hints"].extend(backend)
+            self.results["framework_hints"].extend(fw)
 
     # -----------------------------
     # Findings helpers
     # -----------------------------
     def add_finding(self, bucket: List[dict], data: dict):
-        bucket.append(data)
+        with self._results_lock:
+            bucket.append(data)
 
     def looks_like_real_route(self, p: str) -> bool:
         if not p:
@@ -532,18 +576,15 @@ class DarkmLens:
         if raw.lower().startswith(("mailto:", "tel:", "javascript:", "data:")):
             return None
 
-        # absolute url
         if raw.startswith("http://") or raw.startswith("https://"):
             p = urlparse(raw)
             return p.path or "/"
 
-        # ./x.html or x.html -> treat as /x.html
         if raw.startswith("./"):
             raw = raw[1:]
         if not raw.startswith("/"):
             raw = "/" + raw
 
-        # strip fragments
         p = urlparse(raw)
         return p.path or "/"
 
@@ -741,19 +782,15 @@ class DarkmLens:
                     add_dom_url(parts[-1].strip(), "meta[refresh]")
 
     def _extract_js_navigation_routes(self, text: str, base: str, source_name: str, source_kind: str):
-        # Detect JS navigation strings and add as routes
         for rx in self.JS_NAV_RE:
             for m in rx.finditer(text):
                 ln = line_number_from_index(text, m.start())
 
-                # special: router.navigate([ ... ])
                 if "arg" in m.groupdict() and m.groupdict().get("arg"):
                     arg = m.group("arg")
-                    # if it's an array like ["app","dashboard"] or ["/login"]
                     if arg.strip().startswith("["):
                         items = re.findall(r'["\']([^"\']+)["\']', arg)
                         if items:
-                            # Join as path
                             if items[0].startswith("/"):
                                 raw = items[0]
                             else:
@@ -773,14 +810,11 @@ class DarkmLens:
                 if not rawu:
                     continue
 
-                # normalize path and keep .html too (tracking_view.html)
                 path = self._normalize_route_to_path(rawu)
                 if not path:
                     continue
 
-                # allow /tracking_view.html too (it might be a real page)
                 if not self.looks_like_real_route(path):
-                    # still allow html pages like /tracking_view.html
                     if not re.search(r'\.html?$', path, re.IGNORECASE):
                         continue
 
@@ -794,11 +828,12 @@ class DarkmLens:
                     })
 
     def extract_from_text(self, text: str, base: str, source_name: str, source_kind: str):
+        if not text:
+            return
+
         if source_kind in ("js", "css", "html"):
-            # richer inference (js/css/html can include fetch/axios/etc)
             self.infer_requests_from_text(text, base, source_name)
 
-        # JS navigation routes (important: this is what you requested)
         if source_kind in ("js", "html"):
             self._extract_js_navigation_routes(text, base, source_name, source_kind)
 
@@ -820,10 +855,12 @@ class DarkmLens:
                 self.add_finding(self.results["endpoints"]["graphql"], {"url_or_path": u, "found_in": source_name, "line": ln})
 
             if "firestore.googleapis.com" in lower:
-                self.results["firebase"]["detected"] = True
+                with self._results_lock:
+                    self.results["firebase"]["detected"] = True
                 self.add_finding(self.results["firebase"]["firestore_rest"], {"url": u, "found_in": source_name, "line": ln})
             if ".firebaseio.com" in lower and u.endswith(".json"):
-                self.results["firebase"]["detected"] = True
+                with self._results_lock:
+                    self.results["firebase"]["detected"] = True
                 self.add_finding(self.results["firebase"]["rtdb"], {"url": u, "found_in": source_name, "line": ln})
 
         for m in self.REL_ENDPOINT_RE.finditer(text):
@@ -840,14 +877,16 @@ class DarkmLens:
             self.add_finding(self.results["endpoints"]["base_urls"], {"value": val, "found_in": source_name, "line": ln})
 
         if self.FIREBASE_HINT_RE.search(text):
-            self.results["firebase"]["detected"] = True
+            with self._results_lock:
+                self.results["firebase"]["detected"] = True
             for m in self.FIREBASE_STRICT_RE.finditer(text):
                 blob = m.group(1).strip()
                 ln = line_number_from_index(text, m.start())
                 self.add_finding(self.results["firebase"]["configs"], {"blob": blob, "found_in": source_name, "line": ln})
 
         if "collection(" in text or "collectionGroup(" in text:
-            self.results["firebase"]["detected"] = True
+            with self._results_lock:
+                self.results["firebase"]["detected"] = True
             for m in self.FIRESTORE_COLLECTION_CALL_RE.finditer(text):
                 col = m.group(1)
                 ln = line_number_from_index(text, m.start())
@@ -882,7 +921,6 @@ class DarkmLens:
             ln = line_number_from_index(text, m.start())
             self.add_finding(self.results["exposed_configs"]["segment"], {"key": key, "found_in": source_name, "line": ln})
 
-        # Generic route strings in JS/CSS
         if source_kind in ("js", "css"):
             for m in self.ROUTE_RE.finditer(text):
                 p = m.group(1)
@@ -892,7 +930,6 @@ class DarkmLens:
                 full = urljoin(base, p)
                 self.add_finding(self.results["inventory"]["routes_full_urls"], {"path": p, "full_url": full, "found_in": source_name, "line": ln})
 
-        # Firestore REST parse probable collection
         for m in self.FIRESTORE_REST_RE.finditer(text):
             u = m.group(0)
             pm = self.FIRESTORE_DOCS_PATH_RE.search(u)
@@ -907,7 +944,6 @@ class DarkmLens:
                         "evidence": "firestore REST URL"
                     })
 
-        # RTDB parse probable top segment
         for m in self.RTDB_RE.finditer(text):
             project = m.group(1)
             path = m.group(2)
@@ -924,18 +960,22 @@ class DarkmLens:
     # Sourcemaps
     # -----------------------------
     def try_fetch_sourcemap(self, asset_url: str, asset_text: str, base_origin_url: str):
-        m = self.SOURCEMAP_RE.search(asset_text)
+        m = self.SOURCEMAP_RE.search(asset_text or "")
         if not m:
             return
         map_ref = m.group(1).strip().strip('"').strip("'")
         map_url = urljoin(asset_url, map_ref)
         if not same_origin(map_url, base_origin_url):
             return
-        self.results["stats"]["maps_found"] += 1
-        if self.results["stats"]["maps_fetched"] >= self.max_map_files:
-            return
+
+        with self._maps_lock:
+            self.results["stats"]["maps_found"] += 1
+            if self.results["stats"]["maps_fetched"] >= self.max_map_files:
+                return
 
         fr = self.fetch(map_url)
+        if self.sleep_between:
+            time.sleep(self.sleep_between)
         if not fr or fr.status >= 400 or not fr.text:
             return
         try:
@@ -943,15 +983,20 @@ class DarkmLens:
         except Exception:
             return
 
-        self.results["stats"]["maps_fetched"] += 1
-        self.results["exposed_configs"]["other"].append({
-            "sourcemap": {
-                "map_url": map_url,
-                "file": data.get("file"),
-                "sources_sample": cap_list((data.get("sources") or []), 40),
-                "names_sample": cap_list((data.get("names") or []), 50),
-            }
-        })
+        with self._maps_lock:
+            if self.results["stats"]["maps_fetched"] >= self.max_map_files:
+                return
+            self.results["stats"]["maps_fetched"] += 1
+
+        with self._results_lock:
+            self.results["exposed_configs"]["other"].append({
+                "sourcemap": {
+                    "map_url": map_url,
+                    "file": data.get("file"),
+                    "sources_sample": cap_list((data.get("sources") or []), 40),
+                    "names_sample": cap_list((data.get("names") or []), 50),
+                }
+            })
 
         for i, sc in enumerate(cap_list((data.get("sourcesContent") or []), 12)):
             if isinstance(sc, str) and sc:
@@ -966,7 +1011,8 @@ class DarkmLens:
         try:
             from playwright.sync_api import sync_playwright  # type: ignore
         except Exception:
-            self.results["notes"].append("Playwright no instalado: sin screenshots.")
+            with self._results_lock:
+                self.results["notes"].append("Playwright no instalado: sin screenshots.")
             return None
 
         try:
@@ -985,7 +1031,8 @@ class DarkmLens:
                 browser.close()
             return out_path
         except Exception as e:
-            self.results["notes"].append(f"Screenshot error for {url}: {e}")
+            with self._results_lock:
+                self.results["notes"].append(f"Screenshot error for {url}: {e}")
             return None
 
     # -----------------------------
@@ -1014,11 +1061,56 @@ class DarkmLens:
                 f.write(fr.text[:250_000])
             return os.path.join("routes", fname)
         except Exception as e:
-            self.results["notes"].append(f"Save body error {url}: {e}")
+            with self._results_lock:
+                self.results["notes"].append(f"Save body error {url}: {e}")
             return None
 
     # -----------------------------
-    # Crawl logic
+    # Deep endpoints: analyze page scripts (threaded)
+    # -----------------------------
+    def _deep_analyze_page_scripts(self, html: str, page_url: str, base_origin: str):
+        """
+        From a page HTML, fetch and analyze same-origin scripts (limited) to extract endpoints.
+        Runs script fetches in parallel.
+        """
+        try:
+            soup = BeautifulSoup(html, "html.parser")
+        except Exception:
+            return
+
+        scripts = []
+        for s in soup.find_all("script", src=True):
+            src = s.get("src") or ""
+            if not src:
+                continue
+            u = urljoin(page_url, src)
+            if not same_origin(u, base_origin):
+                continue
+            scripts.append(u)
+
+        scripts = uniq_list(scripts)[:25]  # hard cap
+        if not scripts:
+            return
+
+        def worker(u: str):
+            if self.verbose:
+                print(f"{Fore.CYAN}[deep-js] {u}")
+            ar = self.fetch(u)
+            if self.sleep_between:
+                time.sleep(self.sleep_between)
+            if not ar or ar.status >= 400 or not ar.text:
+                return
+            self.extract_from_text(ar.text, base_origin, f"DEEP_ASSET: {u} (from {page_url})", source_kind="js")
+            self.try_fetch_sourcemap(u, ar.text, base_origin)
+
+        with ThreadPoolExecutor(max_workers=self.deep_threads) as ex:
+            futs = [ex.submit(worker, u) for u in scripts]
+            for _ in as_completed(futs):
+                if self._stop_event.is_set():
+                    break
+
+    # -----------------------------
+    # Crawl logic (threaded)
     # -----------------------------
     def _extract_title(self, html: str) -> str:
         try:
@@ -1032,88 +1124,157 @@ class DarkmLens:
         if not self.crawl_pages:
             return
 
-        print(f"[*] Crawling páginas (same-origin) con headers={'SI' if bool(self.extra_headers) else 'NO'} ...")
+        print(f"[*] Crawling páginas (same-origin) [THREADS={self.crawl_threads}] con headers={'SI' if bool(self.extra_headers) else 'NO'} ...")
         base = start_url
-        q: List[Tuple[str, int]] = [(start_url, 0)]
+
+        qwork: "queue.Queue[Tuple[str,int]]" = queue.Queue()
+        qwork.put((start_url, 0))
+
         seen: Set[str] = set()
+        seen_lock = threading.Lock()
+
         visited_count = 0
+        visited_lock = threading.Lock()
 
-        while q and visited_count < self.max_pages:
-            url, depth = q.pop(0)
-            url = normalize_url(url)
-            if url in seen:
-                continue
-            seen.add(url)
+        def can_take_page() -> bool:
+            nonlocal visited_count
+            with visited_lock:
+                return visited_count < self.max_pages
 
-            if not same_origin(url, base):
-                continue
-            if depth > self.max_depth:
-                continue
+        def mark_page_taken():
+            nonlocal visited_count
+            with visited_lock:
+                visited_count += 1
+                with self._stats_lock:
+                    self.results["stats"]["pages_visited"] = visited_count
 
-            fr = self.fetch(url)
-            time.sleep(self.sleep_between)
+        def worker():
+            while not self._stop_event.is_set():
+                try:
+                    url, depth = qwork.get(timeout=0.25)
+                except queue.Empty:
+                    return
 
-            if not fr:
-                self.results["crawl"]["access_matrix"].append({"url": url, "status": None, "ct": None, "ok": False, "reason": "fetch_failed"})
-                continue
-
-            ok = (fr.status < 400)
-            self.results["crawl"]["access_matrix"].append({
-                "url": url,
-                "status": fr.status,
-                "ct": fr.content_type,
-                "ok": ok,
-                "reason": "" if ok else f"HTTP_{fr.status}",
-            })
-
-            title = self._extract_title(fr.text) if "html" in fr.content_type else ""
-            saved_body = self.save_route_body(url, fr, prefix="crawl")
-
-            shot_rel = None
-            if self.enable_screenshot:
-                shot_name = f"crawl__{sha1(url)}.png"
-                shot_path = os.path.join(self.out_dir, "screens", shot_name)
-                if self.take_screenshot(url, shot_path):
-                    shot_rel = os.path.join("screens", shot_name)
-                    self.results["screenshots"]["routes"].append({"url": url, "path": shot_rel, "kind": "crawl"})
-
-            self.results["crawl"]["visited_pages"].append({
-                "url": url,
-                "final_url": fr.url,
-                "depth": depth,
-                "status": fr.status,
-                "ct": fr.content_type,
-                "title": title,
-                "screenshot": shot_rel,
-                "saved_body": saved_body,
-            })
-            visited_count += 1
-            self.results["stats"]["pages_visited"] = visited_count
-
-            if "html" in (fr.content_type or "") and fr.text:
-                soup = BeautifulSoup(fr.text, "html.parser")
-                self.extract_routes_from_dom(soup, base, page_url=url)
-
-                for a in soup.find_all("a", href=True):
-                    href = a.get("href") or ""
-                    if not href or href.lower().startswith(("mailto:", "tel:", "javascript:", "data:")):
+                url = normalize_url(url)
+                with seen_lock:
+                    if url in seen:
+                        qwork.task_done()
                         continue
-                    u2 = urljoin(fr.url, href)
-                    if not same_origin(u2, base):
-                        continue
-                    if self.ASSET_EXT_RE.match(u2):
-                        continue
-                    u2 = normalize_url(u2)
-                    if u2 not in seen:
-                        q.append((u2, depth + 1))
+                    seen.add(url)
 
-                self.extract_from_text(fr.text, base, f"CRAWL_HTML: {url}", source_kind="html")
-            else:
-                if is_probably_text(fr.content_type) and fr.text:
-                    self.extract_from_text(fr.text, base, f"CRAWL_TEXT: {url}", source_kind="js" if "javascript" in fr.content_type else "html")
+                if not same_origin(url, base) or depth > self.max_depth:
+                    qwork.task_done()
+                    continue
+
+                if not can_take_page():
+                    qwork.task_done()
+                    return
+
+                print(f"{Fore.BLUE}[*] CRAWL visit: {url} (depth={depth})")
+                fr = self.fetch(url)
+                if self.sleep_between:
+                    time.sleep(self.sleep_between)
+
+                if not fr:
+                    with self._results_lock:
+                        self.results["crawl"]["access_matrix"].append({"url": url, "status": None, "ct": None, "ok": False, "reason": "fetch_failed"})
+                    qwork.task_done()
+                    continue
+
+                ok = (fr.status < 400)
+                with self._results_lock:
+                    self.results["crawl"]["access_matrix"].append({
+                        "url": url,
+                        "status": fr.status,
+                        "ct": fr.content_type,
+                        "ok": ok,
+                        "reason": "" if ok else f"HTTP_{fr.status}",
+                    })
+
+                title = self._extract_title(fr.text) if "html" in (fr.content_type or "") else ""
+                saved_body = self.save_route_body(url, fr, prefix="crawl")
+
+                shot_rel = None
+                if self.enable_screenshot:
+                    shot_name = f"crawl__{sha1(url)}.png"
+                    shot_path = os.path.join(self.out_dir, "screens", shot_name)
+                    if self.take_screenshot(url, shot_path):
+                        shot_rel = os.path.join("screens", shot_name)
+                        with self._screens_lock:
+                            self.results["screenshots"]["routes"].append({"url": url, "path": shot_rel, "kind": "crawl"})
+
+                with self._results_lock:
+                    self.results["crawl"]["visited_pages"].append({
+                        "url": url,
+                        "final_url": fr.url,
+                        "depth": depth,
+                        "status": fr.status,
+                        "ct": fr.content_type,
+                        "title": title,
+                        "screenshot": shot_rel,
+                        "saved_body": saved_body,
+                    })
+
+                mark_page_taken()
+
+                if "html" in (fr.content_type or "") and fr.text:
+                    try:
+                        soup = BeautifulSoup(fr.text, "html.parser")
+                    except Exception:
+                        soup = None
+
+                    if soup is not None:
+                        self.extract_routes_from_dom(soup, base, page_url=url)
+
+                        for a in soup.find_all("a", href=True):
+                            href = a.get("href") or ""
+                            if not href or href.lower().startswith(("mailto:", "tel:", "javascript:", "data:")):
+                                continue
+                            u2 = urljoin(fr.url, href)
+                            if not same_origin(u2, base):
+                                continue
+                            if self.ASSET_EXT_RE.match(u2):
+                                continue
+                            u2 = normalize_url(u2)
+                            with seen_lock:
+                                if u2 not in seen and depth + 1 <= self.max_depth:
+                                    qwork.put((u2, depth + 1))
+
+                    self.extract_from_text(fr.text, base, f"CRAWL_HTML: {url}", source_kind="html")
+
+                    if self.deep_endpoints:
+                        self._deep_analyze_page_scripts(fr.text, page_url=url, base_origin=base)
+                else:
+                    if is_probably_text(fr.content_type) and fr.text:
+                        self.extract_from_text(fr.text, base, f"CRAWL_TEXT: {url}", source_kind="js" if "javascript" in (fr.content_type or "") else "html")
+
+                qwork.task_done()
+
+        threads = []
+        for _ in range(self.crawl_threads):
+            t = threading.Thread(target=worker, daemon=True)
+            t.start()
+            threads.append(t)
+
+        # Wait until queue finishes or stop
+        try:
+            while any(t.is_alive() for t in threads):
+                if self._stop_event.is_set():
+                    break
+                time.sleep(0.1)
+        except KeyboardInterrupt:
+            self._stop_event.set()
+
+        # Drain quickly
+        while not qwork.empty():
+            try:
+                qwork.get_nowait()
+                qwork.task_done()
+            except Exception:
+                break
 
     # -----------------------------
-    # Main scan (root + assets)
+    # Main scan (root + assets) [assets threaded]
     # -----------------------------
     def scan_source_and_assets(self):
         print(f"[*] Analizando HTML inicial y assets (same-origin)...")
@@ -1122,10 +1283,11 @@ class DarkmLens:
             print(f"{Fore.RED}[!] No pude acceder a la URL.")
             return
 
-        self.results["final_url"] = fr.url
-        base = fr.url
+        with self._results_lock:
+            self.results["final_url"] = fr.url
+            self.results["server_headers"] = summarize_headers(fr.headers)
 
-        self.results["server_headers"] = summarize_headers(fr.headers)
+        base = fr.url
         self.fingerprint_html_and_headers(fr.text, fr.headers)
 
         soup = BeautifulSoup(fr.text, "html.parser")
@@ -1135,7 +1297,8 @@ class DarkmLens:
             u = urljoin(base, a["href"])
             if same_origin(u, base):
                 internal_links.add(normalize_url(u))
-        self.results["inventory"]["internal_links"] = sorted(internal_links)
+        with self._results_lock:
+            self.results["inventory"]["internal_links"] = sorted(internal_links)
 
         self.extract_routes_from_dom(soup, base, page_url=base)
 
@@ -1151,67 +1314,80 @@ class DarkmLens:
         if next_data and next_data.string:
             try:
                 data = json.loads(next_data.string)
-                self.results["nextjs"]["buildId"] = data.get("buildId")
-                self.results["nextjs"]["page"] = data.get("page")
-                self.results["nextjs"]["detected"] = True
+                with self._results_lock:
+                    self.results["nextjs"]["buildId"] = data.get("buildId")
+                    self.results["nextjs"]["page"] = data.get("page")
+                    self.results["nextjs"]["detected"] = True
             except Exception:
                 pass
 
-        self.results["nextjs"]["assets"]["scripts"] = uniq_list(scripts)
-        self.results["nextjs"]["assets"]["styles"] = uniq_list(styles)
-        self.results["nextjs"]["assets"]["images"] = uniq_list(imgs)
+        with self._results_lock:
+            self.results["nextjs"]["assets"]["scripts"] = uniq_list(scripts)
+            self.results["nextjs"]["assets"]["styles"] = uniq_list(styles)
+            self.results["nextjs"]["assets"]["images"] = uniq_list(imgs)
 
-        self.results["inventory"]["assets"]["scripts"] = self.results["nextjs"]["assets"]["scripts"]
-        self.results["inventory"]["assets"]["styles"] = self.results["nextjs"]["assets"]["styles"]
-        self.results["inventory"]["assets"]["images"] = self.results["nextjs"]["assets"]["images"]
+            self.results["inventory"]["assets"]["scripts"] = self.results["nextjs"]["assets"]["scripts"]
+            self.results["inventory"]["assets"]["styles"] = self.results["nextjs"]["assets"]["styles"]
+            self.results["inventory"]["assets"]["images"] = self.results["nextjs"]["assets"]["images"]
 
         self.extract_from_text(fr.text, base, f"HTML: {base}", source_kind="html")
 
+        # Threaded asset fetch
         asset_urls = uniq_list(scripts + styles)
-        fetched = 0
-        for u in asset_urls:
-            if fetched >= self.max_assets:
-                break
-            if not same_origin(u, base):
-                continue
+        asset_urls = [u for u in asset_urls if same_origin(u, base)]
+        asset_urls = asset_urls[: self.max_assets]
 
+        print(f"{Fore.CYAN}[*] Assets queued: {len(asset_urls)} (THREADS={self.asset_threads})")
+
+        def asset_worker(u: str):
+            if self.verbose:
+                print(f"{Fore.BLUE}[*] ASSET fetch: {u}")
             ar = self.fetch(u)
-            time.sleep(self.sleep_between)
+            if self.sleep_between:
+                time.sleep(self.sleep_between)
             if not ar or ar.status >= 400:
-                continue
-
-            fetched += 1
-            self.results["stats"]["assets_fetched"] = fetched
+                return
+            with self._stats_lock:
+                self.results["stats"]["assets_fetched"] += 1
 
             is_js = u.lower().endswith(".js") or "javascript" in (ar.content_type or "")
             kind = "js" if is_js else "css"
-
             self.extract_from_text(ar.text, base, f"ASSET: {u}", source_kind=kind)
-
             if is_js:
                 self.try_fetch_sourcemap(u, ar.text, base)
 
+        with ThreadPoolExecutor(max_workers=self.asset_threads) as ex:
+            futs = [ex.submit(asset_worker, u) for u in asset_urls]
+            for _ in as_completed(futs):
+                if self._stop_event.is_set():
+                    break
+
+        # Crawl (threaded)
         self.crawl_pages_same_origin(base)
 
+        # Main screenshot
         if self.enable_screenshot:
             main_shot = os.path.join(self.out_dir, "screenshot.png")
             if self.take_screenshot(self.target_url, main_shot):
-                self.results["screenshots"]["main"] = "screenshot.png"
+                with self._results_lock:
+                    self.results["screenshots"]["main"] = "screenshot.png"
 
         if self.probe_get_endpoints:
             self._probe_inferred_get_endpoints(base)
 
-        # authz audit after we have routes
         if self.audit_authz:
             self._authz_audit_routes(base)
 
         self._dedup_findings()
 
     def _probe_inferred_get_endpoints(self, base_origin: str):
-        print("[*] Probing seguro (solo GET) de algunos endpoints inferidos...")
+        print("[*] Probing seguro (solo GET) de algunos endpoints inferidos... (threaded)")
         out = []
         candidates = []
-        for r in self.results["endpoints"]["requests_inferred"]:
+        with self._results_lock:
+            reqs = list(self.results["endpoints"]["requests_inferred"])
+
+        for r in reqs:
             meth = (r.get("method") or "").upper()
             full = r.get("full_url") or ""
             if not full or not full.startswith("http"):
@@ -1225,48 +1401,63 @@ class DarkmLens:
             candidates.append(full)
 
         candidates = uniq_list(candidates)[:25]
-        for u in candidates:
+
+        def worker(u: str):
             fr = self.fetch(u)
-            time.sleep(self.sleep_between)
+            if self.sleep_between:
+                time.sleep(self.sleep_between)
             if not fr:
-                out.append({"url": u, "status": None, "ct": None})
-            else:
-                out.append({"url": u, "status": fr.status, "ct": fr.content_type})
-        self.results["endpoints"]["probed_get"] = out
+                return {"url": u, "status": None, "ct": None}
+            return {"url": u, "status": fr.status, "ct": fr.content_type}
+
+        with ThreadPoolExecutor(max_workers=min(10, self.threads)) as ex:
+            futs = [ex.submit(worker, u) for u in candidates]
+            for f in as_completed(futs):
+                if self._stop_event.is_set():
+                    break
+                try:
+                    out.append(f.result())
+                except Exception:
+                    pass
+
+        with self._results_lock:
+            self.results["endpoints"]["probed_get"] = out
 
     # -----------------------------
-    # AuthZ audit (visit routes and classify)
+    # AuthZ audit (threaded)
     # -----------------------------
     def _build_route_candidates(self, base_origin: str) -> List[str]:
-        # Collect from routes_full_urls + internal_links + endpoints relative
         candidates: Set[str] = set()
 
-        for r in (self.results.get("inventory", {}).get("routes_full_urls") or []):
+        with self._results_lock:
+            inv_routes = list(self.results.get("inventory", {}).get("routes_full_urls") or [])
+            inv_links = list(self.results.get("inventory", {}).get("internal_links") or [])
+            rels = list(self.results.get("endpoints", {}).get("relative") or [])
+            reqs = list(self.results.get("endpoints", {}).get("requests_inferred") or [])
+
+        for r in inv_routes:
             u = r.get("full_url") or ""
             if u and same_origin(u, base_origin):
                 candidates.add(normalize_url(u))
 
-        for u in (self.results.get("inventory", {}).get("internal_links") or []):
+        for u in inv_links:
             if u and same_origin(u, base_origin):
                 candidates.add(normalize_url(u))
 
-        for r in (self.results.get("endpoints", {}).get("relative") or []):
+        for r in rels:
             u = r.get("full_url") or ""
             if u and same_origin(u, base_origin):
                 candidates.add(normalize_url(u))
 
-        # Also add any inferred request urls that are same-origin
-        for r in (self.results.get("endpoints", {}).get("requests_inferred") or []):
+        for r in reqs:
             u = r.get("full_url") or ""
             if u and u.startswith("http") and same_origin(u, base_origin):
                 candidates.add(normalize_url(u))
 
-        # keep only unique and limit
         out = sorted(candidates)
         return out[: self.authz_max_routes]
 
     def _is_login_like(self, fr: FetchResult) -> bool:
-        # heuristic: redirect to /login, html contains login keywords
         final_path = (urlparse(fr.url).path or "").lower()
         if "login" in final_path or "signin" in final_path:
             return True
@@ -1277,45 +1468,39 @@ class DarkmLens:
         return hits >= 2
 
     def _classify_access(self, fr: Optional[FetchResult], base_origin: str, req_url: str) -> Tuple[str, str]:
-        # returns (state, reason)
         if fr is None:
             return ("sin acceso", "fetch_failed")
 
         if fr.status in (401, 403):
             return ("sin acceso", f"http_{fr.status}")
 
-        # if redirected to other origin, treat as "sin acceso" (usually SSO)
         if not same_origin(fr.url, base_origin):
             return ("sin acceso", "redirect_other_origin")
 
-        # 3xx with location containing login
         loc = (fr.headers.get("Location") or fr.headers.get("location") or "").lower()
         if fr.status in (301, 302, 303, 307, 308) and ("login" in loc or "signin" in loc):
             return ("sin acceso", f"redirect_login ({fr.status})")
 
-        # if looks like login page despite 200
         if fr.status < 400 and self._is_login_like(fr):
             return ("sin acceso", "login_like_content")
 
-        # if 200/204 and not login-like => con acceso
         if fr.status in (200, 204):
             return ("con acceso", f"http_{fr.status}")
 
-        # 404 is not auth-related
         if fr.status == 404:
             return ("sin acceso", "not_found_404")
 
-        # other
         if fr.status < 400:
             return ("con acceso", f"http_{fr.status}")
         return ("sin acceso", f"http_{fr.status}")
 
     def _params_body_map_by_path(self, base_origin: str) -> Dict[str, Dict[str, Any]]:
-        """
-        Build map: path -> {params:set, body_keys:set, methods:set, samples:[...]}
-        """
         m: Dict[str, Dict[str, Any]] = {}
-        for r in (self.results.get("endpoints", {}).get("requests_inferred") or []):
+
+        with self._results_lock:
+            reqs = list(self.results.get("endpoints", {}).get("requests_inferred") or [])
+
+        for r in reqs:
             full = r.get("full_url") or ""
             if not full or not full.startswith("http"):
                 continue
@@ -1329,7 +1514,6 @@ class DarkmLens:
                 m[p]["params"].add(qk)
             for bk in (r.get("body_keys") or []):
                 m[p]["body_keys"].add(bk)
-            # sample evidence
             if len(m[p]["samples"]) < 5:
                 m[p]["samples"].append({
                     "method": (r.get("method") or "UNKNOWN").upper(),
@@ -1341,11 +1525,6 @@ class DarkmLens:
         return m
 
     def _ai_summarize_route(self, route_url: str, fr: Optional[FetchResult], inferred: Dict[str, Any]) -> str:
-        """
-        Local AI summary using Ollama if enabled; otherwise heuristic summary.
-        Never returns empty string.
-        """
-        # heuristic summary fallback
         status = fr.status if fr else None
         ct = fr.content_type if fr else ""
         params = sorted(list(inferred.get("params") or []))
@@ -1359,13 +1538,10 @@ class DarkmLens:
 
         try:
             import subprocess
-            # quick check ollama exists
             subprocess.run(["ollama", "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
         except Exception:
-            # if no ollama, don't be blank
             return heuristic + " | (ollama no disponible)"
 
-        # Build small prompt (fast)
         snippet = ""
         if fr and fr.text:
             snippet = re.sub(r"\s+", " ", fr.text[:1500])
@@ -1383,7 +1559,6 @@ class DarkmLens:
 
         try:
             import subprocess
-            # Use ollama run (simple)
             cp = subprocess.run(
                 ["ollama", "run", self.ai_model],
                 input=prompt.encode("utf-8", errors="ignore"),
@@ -1394,25 +1569,29 @@ class DarkmLens:
             out = (cp.stdout.decode("utf-8", errors="ignore") or "").strip()
             if not out:
                 return heuristic + " | (ollama vacío)"
-            # compress
             out = re.sub(r"\s+", " ", out).strip()
             return out[:340]
         except Exception as e:
             return heuristic + f" | (ollama error: {e})"
 
     def _authz_audit_routes(self, base_origin: str):
-        print(f"[*] AuthZ audit: visitando rutas detectadas (max={self.authz_max_routes}) "
+        print(f"[*] AuthZ audit (THREADS={self.authz_threads}): visitando rutas detectadas (max={self.authz_max_routes}) "
               f"screenshots={'SI' if self.authz_take_screenshots else 'NO'} ...")
 
         candidates = self._build_route_candidates(base_origin)
         inferred_map = self._params_body_map_by_path(base_origin)
 
-        tested = 0
-        items = []
+        items_lock = threading.Lock()
+        items: List[dict] = []
 
-        for u in candidates:
+        def worker(u: str):
+            if self._stop_event.is_set():
+                return
+            if self.verbose:
+                print(f"{Fore.BLUE}[*] AUTHZ test: {u}")
             fr = self.fetch(u)
-            time.sleep(self.sleep_between)
+            if self.sleep_between:
+                time.sleep(self.sleep_between)
             state, reason = self._classify_access(fr, base_origin, u)
 
             p = urlparse(u).path or "/"
@@ -1420,9 +1599,7 @@ class DarkmLens:
 
             params = sorted(list(inferred.get("params") or []))
             body_keys = sorted(list(inferred.get("body_keys") or []))
-            methods = sorted(list(inferred.get("methods") or []))
-            if not methods:
-                methods = ["GET"]
+            methods = sorted(list(inferred.get("methods") or [])) or ["GET"]
 
             saved_body = None
             if fr:
@@ -1434,37 +1611,48 @@ class DarkmLens:
                 shot_path = os.path.join(self.out_dir, "screens", shot_name)
                 if self.take_screenshot(u, shot_path):
                     shot_rel = os.path.join("screens", shot_name)
-                    # include in global screenshots for gallery
-                    self.results["screenshots"]["routes"].append({"url": u, "path": shot_rel, "kind": "authz"})
+                    with self._screens_lock:
+                        self.results["screenshots"]["routes"].append({"url": u, "path": shot_rel, "kind": "authz"})
 
             resp_snip = None
             if self.authz_show_response and fr and fr.text:
                 resp_snip = re.sub(r"\s+", " ", fr.text[: self.authz_response_chars]).strip()
 
+            if self.deep_endpoints and fr and "html" in (fr.content_type or "") and fr.text:
+                self._deep_analyze_page_scripts(fr.text, page_url=u, base_origin=base_origin)
+
             ai_summary = self._ai_summarize_route(u, fr, inferred)
 
-            items.append({
-                "url": u,
-                "path": p,
-                "status": fr.status if fr else None,
-                "final_url": fr.url if fr else None,
-                "ct": fr.content_type if fr else None,
-                "state": state,                 # "con acceso" / "sin acceso"
-                "reason": reason,
-                "params": params,
-                "methods": methods,
-                "body_keys": body_keys,
-                "samples": inferred.get("samples") or [],
-                "screenshot": shot_rel,
-                "saved_body": saved_body,
-                "response_snippet": resp_snip,
-                "ai_summary": ai_summary,
-            })
+            with items_lock:
+                items.append({
+                    "url": u,
+                    "path": p,
+                    "status": fr.status if fr else None,
+                    "final_url": fr.url if fr else None,
+                    "ct": fr.content_type if fr else None,
+                    "state": state,
+                    "reason": reason,
+                    "params": params,
+                    "methods": methods,
+                    "body_keys": body_keys,
+                    "samples": inferred.get("samples") or [],
+                    "screenshot": shot_rel,
+                    "saved_body": saved_body,
+                    "response_snippet": resp_snip,
+                    "ai_summary": ai_summary,
+                })
 
-            tested += 1
-            self.results["stats"]["authz_routes_tested"] = tested
+            with self._stats_lock:
+                self.results["stats"]["authz_routes_tested"] += 1
 
-        self.results["authz_audit"]["items"] = items
+        with ThreadPoolExecutor(max_workers=self.authz_threads) as ex:
+            futs = [ex.submit(worker, u) for u in candidates]
+            for _ in as_completed(futs):
+                if self._stop_event.is_set():
+                    break
+
+        with self._results_lock:
+            self.results["authz_audit"]["items"] = items
 
     # -----------------------------
     # Dedup
@@ -1481,90 +1669,84 @@ class DarkmLens:
                 out.append(d)
             return out
 
-        self.results["technologies"] = sorted(set(self.results["technologies"]))
-        self.results["fingerprints"] = sorted(set(self.results["fingerprints"]))
-        self.results["backend_hints"] = uniq_list(self.results["backend_hints"])
-        self.results["framework_hints"] = sorted(set(self.results.get("framework_hints") or []))
+        with self._results_lock:
+            self.results["technologies"] = sorted(set(self.results["technologies"]))
+            self.results["fingerprints"] = sorted(set(self.results["fingerprints"]))
+            self.results["backend_hints"] = uniq_list(self.results["backend_hints"])
+            self.results["framework_hints"] = sorted(set(self.results.get("framework_hints") or []))
 
-        ep = self.results["endpoints"]
-        ep["absolute"] = dedup_list_of_dict(ep["absolute"], ["url", "found_in", "line"])
-        ep["relative"] = dedup_list_of_dict(ep["relative"], ["full_url", "found_in", "line"])
-        ep["graphql"] = dedup_list_of_dict(ep["graphql"], ["url_or_path", "found_in", "line"])
-        ep["websocket"] = dedup_list_of_dict(ep["websocket"], ["url", "found_in", "line"])
-        ep["base_urls"] = dedup_list_of_dict(ep["base_urls"], ["value", "found_in", "line"])
-        ep["requests_inferred"] = dedup_list_of_dict(ep["requests_inferred"], ["method", "full_url", "found_in", "line"])
+            ep = self.results["endpoints"]
+            ep["absolute"] = dedup_list_of_dict(ep["absolute"], ["url", "found_in", "line"])
+            ep["relative"] = dedup_list_of_dict(ep["relative"], ["full_url", "found_in", "line"])
+            ep["graphql"] = dedup_list_of_dict(ep["graphql"], ["url_or_path", "found_in", "line"])
+            ep["websocket"] = dedup_list_of_dict(ep["websocket"], ["url", "found_in", "line"])
+            ep["base_urls"] = dedup_list_of_dict(ep["base_urls"], ["value", "found_in", "line"])
+            ep["requests_inferred"] = dedup_list_of_dict(ep["requests_inferred"], ["method", "full_url", "found_in", "line"])
 
-        inv = self.results["inventory"]
-        inv["routes_full_urls"] = dedup_list_of_dict(inv["routes_full_urls"], ["full_url", "path"])
-        inv["internal_links"] = sorted(set(inv["internal_links"]))
+            inv = self.results["inventory"]
+            inv["routes_full_urls"] = dedup_list_of_dict(inv["routes_full_urls"], ["full_url", "path"])
+            inv["internal_links"] = sorted(set(inv["internal_links"]))
 
-        cfg = self.results["exposed_configs"]
-        cfg["aws_amplify_cognito"] = dedup_list_of_dict(cfg["aws_amplify_cognito"], ["hit", "found_in", "line"])
-        cfg["aws_appsync_amplify"] = dedup_list_of_dict(cfg["aws_appsync_amplify"], ["hit", "found_in", "line"])
-        cfg["sentry"] = dedup_list_of_dict(cfg["sentry"], ["dsn", "found_in", "line"])
-        cfg["google_analytics"] = dedup_list_of_dict(cfg["google_analytics"], ["id", "found_in", "line"])
-        cfg["segment"] = dedup_list_of_dict(cfg["segment"], ["key", "found_in", "line"])
+            cfg = self.results["exposed_configs"]
+            cfg["aws_amplify_cognito"] = dedup_list_of_dict(cfg["aws_amplify_cognito"], ["hit", "found_in", "line"])
+            cfg["aws_appsync_amplify"] = dedup_list_of_dict(cfg["aws_appsync_amplify"], ["hit", "found_in", "line"])
+            cfg["sentry"] = dedup_list_of_dict(cfg["sentry"], ["dsn", "found_in", "line"])
+            cfg["google_analytics"] = dedup_list_of_dict(cfg["google_analytics"], ["id", "found_in", "line"])
+            cfg["segment"] = dedup_list_of_dict(cfg["segment"], ["key", "found_in", "line"])
 
-        fb = self.results["firebase"]
-        fb["configs"] = dedup_list_of_dict(fb["configs"], ["blob", "found_in", "line"])
-        fb["firestore_rest"] = dedup_list_of_dict(fb["firestore_rest"], ["url", "found_in", "line"])
-        fb["rtdb"] = dedup_list_of_dict(fb["rtdb"], ["url", "found_in", "line"])
-        fb["collections_probable"] = dedup_list_of_dict(fb["collections_probable"], ["name", "found_in", "evidence"])
+            fb = self.results["firebase"]
+            fb["configs"] = dedup_list_of_dict(fb["configs"], ["blob", "found_in", "line"])
+            fb["firestore_rest"] = dedup_list_of_dict(fb["firestore_rest"], ["url", "found_in", "line"])
+            fb["rtdb"] = dedup_list_of_dict(fb["rtdb"], ["url", "found_in", "line"])
+            fb["collections_probable"] = dedup_list_of_dict(fb["collections_probable"], ["name", "found_in", "evidence"])
 
-        # compact collection names
-        names_seen = set()
-        compact = []
-        for c in fb["collections_probable"]:
-            n = c.get("name")
-            if not n or n in names_seen:
-                continue
-            names_seen.add(n)
-            compact.append(c)
-        fb["collections_probable"] = compact
+            names_seen = set()
+            compact = []
+            for c in fb["collections_probable"]:
+                n = c.get("name")
+                if not n or n in names_seen:
+                    continue
+                names_seen.add(n)
+                compact.append(c)
+            fb["collections_probable"] = compact
 
-        # screenshots routes dedup by url+kind
-        scr = self.results.get("screenshots", {}).get("routes", []) or []
-        seen_k = set()
-        scr2 = []
-        for it in scr:
-            u = normalize_url(it.get("url", "") or "")
-            kind = it.get("kind") or "route"
-            if not u:
-                continue
-            k = (u, kind)
-            if k in seen_k:
-                continue
-            seen_k.add(k)
-            scr2.append(it)
-        self.results["screenshots"]["routes"] = scr2
+            scr = self.results.get("screenshots", {}).get("routes", []) or []
+            seen_k = set()
+            scr2 = []
+            for it in scr:
+                u = normalize_url(it.get("url", "") or "")
+                kind = it.get("kind") or "route"
+                if not u:
+                    continue
+                k = (u, kind)
+                if k in seen_k:
+                    continue
+                seen_k.add(k)
+                scr2.append(it)
+            self.results["screenshots"]["routes"] = scr2
 
-        # authz audit dedup by url
-        ai = self.results.get("authz_audit", {}).get("items") or []
-        seen_u = set()
-        ai2 = []
-        for it in ai:
-            u = normalize_url(it.get("url", "") or "")
-            if not u or u in seen_u:
-                continue
-            seen_u.add(u)
-            ai2.append(it)
-        if "authz_audit" in self.results:
-            self.results["authz_audit"]["items"] = ai2
+            ai = self.results.get("authz_audit", {}).get("items") or []
+            seen_u = set()
+            ai2 = []
+            for it in ai:
+                u = normalize_url(it.get("url", "") or "")
+                if not u or u in seen_u:
+                    continue
+                seen_u.add(u)
+                ai2.append(it)
+            if "authz_audit" in self.results:
+                self.results["authz_audit"]["items"] = ai2
 
     # -----------------------------
-    # HTML Report rendering (template)
+    # HTML Report rendering
     # -----------------------------
     def generate_report(self):
         out_json = os.path.join(self.out_dir, "results.json")
         with open(out_json, "w", encoding="utf-8") as f:
             json.dump(self.results, f, ensure_ascii=False, indent=2)
 
-        # Load template file
         template = read_text_file(self.template_path)
-
-        # Build sections (as JSON-injected; template has JS render)
         payload = json.dumps(self.results, ensure_ascii=False)
-
         html = template.replace("__RESULTS_JSON__", payload)
 
         out_html = os.path.join(self.out_dir, "index.html")
@@ -1620,13 +1802,13 @@ def parse_headers(args: argparse.Namespace) -> Dict[str, str]:
 
 
 def main():
-    p = argparse.ArgumentParser(description="DarkmLens v4.2 (Darkmoon) - Passive exposure report (authorized only)")
+    p = argparse.ArgumentParser(description="DarkmLens v4.3 (Darkmoon) - Passive exposure report (authorized only)")
     p.add_argument("url", help="Target URL (https://example.com/path)")
     p.add_argument("--out", default="out", help="Output folder")
     p.add_argument("--max-assets", type=int, default=120, help="Max same-origin assets to fetch")
     p.add_argument("--max-maps", type=int, default=20, help="Max sourcemaps to fetch")
     p.add_argument("--timeout", type=int, default=15, help="Request timeout seconds")
-    p.add_argument("--sleep", type=float, default=0.03, help="Sleep between fetches")
+    p.add_argument("--sleep", type=float, default=0.03, help="Sleep between fetches (per request). Set 0 for max speed (risky).")
     p.add_argument("--no-screenshot", action="store_true", help="Disable screenshots (Playwright)")
 
     p.add_argument("--no-crawl", action="store_true", help="Disable same-origin crawling of pages")
@@ -1643,10 +1825,7 @@ def main():
     # AuthZ audit
     p.add_argument("--audit-authz", action="store_true", help="Visit discovered same-origin routes and classify access")
     p.add_argument("--authz-max-routes", type=int, default=200, help="Max routes to test in authz audit")
-
-    # alias requested by you
     p.add_argument("--audit-authz-limit", type=int, default=None, help="Alias of --authz-max-routes")
-
     p.add_argument("--authz-no-screenshot-all", action="store_true", help="AuthZ audit: do not take screenshots (still visits routes)")
     p.add_argument("--authz-show-response", action="store_true", help="AuthZ audit: store a small response snippet in results/report")
     p.add_argument("--authz-response-chars", type=int, default=900, help="How many chars of response snippet to include")
@@ -1655,9 +1834,20 @@ def main():
     p.add_argument("--ai-ollama", action="store_true", help="Use local Ollama to summarize each route (optional)")
     p.add_argument("--ai-model", default="llama3.1:8b", help="Ollama model name (example: llama3.1:8b)")
 
+    # Deep endpoints
+    p.add_argument("--deep-endpoints", action="store_true",
+                   help="Deep endpoint discovery: for each visited HTML page, analyze its same-origin <script src> JS to extract endpoints.")
+    p.add_argument("--verbose", action="store_true", help="Verbose: print each page/asset being fetched.")
+
+    # THREADS
+    p.add_argument("--threads", type=int, default=12, help="Global thread count (default 12)")
+    p.add_argument("--asset-threads", type=int, default=None, help="Threads for asset fetching (default: --threads)")
+    p.add_argument("--crawl-threads", type=int, default=None, help="Threads for crawl worker queue (default: min(--threads,10))")
+    p.add_argument("--authz-threads", type=int, default=None, help="Threads for authz audit (default: min(--threads,20))")
+    p.add_argument("--deep-threads", type=int, default=None, help="Threads for deep-endpoints script fetch (default: min(--threads,10))")
+
     args = p.parse_args()
 
-    # map alias
     if args.audit_authz_limit is not None:
         args.authz_max_routes = args.audit_authz_limit
 
@@ -1690,12 +1880,33 @@ def main():
 
         ai_ollama=args.ai_ollama,
         ai_model=args.ai_model,
+
+        deep_endpoints=args.deep_endpoints,
+
+        threads=args.threads,
+        asset_threads=args.asset_threads,
+        crawl_threads=args.crawl_threads,
+        authz_threads=args.authz_threads,
+        deep_threads=args.deep_threads,
     )
-    s.run()
+    s.verbose = args.verbose
+
+    try:
+        s.run()
+    except KeyboardInterrupt:
+        print(f"\n{Fore.YELLOW}[!] Interrumpido por el usuario. Generando reporte parcial...")
+        try:
+            s._stop_event.set()
+            s._dedup_findings()
+            s.generate_report()
+            print(f"{Fore.GREEN}[+] Reporte parcial guardado en: {os.path.join(s.out_dir, 'index.html')}")
+        except Exception as e:
+            print(f"{Fore.RED}[!] No pude generar el reporte parcial: {e}")
 
 
 # =============================
 # Default HTML template written to out/report.template.html
+# (Tu template original se mantiene tal cual)
 # =============================
 DEFAULT_REPORT_TEMPLATE = r"""<!doctype html>
 <html lang="es">
@@ -1767,6 +1978,10 @@ DEFAULT_REPORT_TEMPLATE = r"""<!doctype html>
     .t-url{font-size:12px;color:var(--txt);word-break:break-all}
     .t-meta{margin-top:6px;font-size:11px;color:var(--muted);word-break:break-word}
     .t-mini{margin-top:6px;font-size:11px;color:rgba(152,167,184,0.85);word-break:break-word}
+
+    /* Collapsible cards */
+    details > summary { list-style: none; cursor: pointer; }
+    details > summary::-webkit-details-marker { display:none; }
   </style>
 </head>
 <body>
@@ -1794,12 +2009,11 @@ function table(cols, rows){
 
 function card(title, body, extraClass=""){
   const cls = extraClass ? `card ${extraClass}` : "card";
-  return `<section class="${cls}">
-    <div class="card-h"><h2>${esc(title)}</h2><div></div></div>
+  return `<details class="${cls}" open>
+    <summary class="card-h"><h2>${esc(title)}</h2><div class="pill">toggle</div></summary>
     <div class="card-b">${body}</div>
-  </section>`;
+  </details>`;
 }
-
 
 function accessBadge(state){
   if(state === 'con acceso') return badge('con acceso', 'blue');
@@ -1818,6 +2032,29 @@ function statusBadge(code){
   return badge(String(n),'gray');
 }
 
+function wireTableSearch(inputId, wrapId, countId){
+  const input = document.getElementById(inputId);
+  const wrap = document.getElementById(wrapId);
+  const count = document.getElementById(countId);
+  if(!input || !wrap) return;
+
+  function apply(){
+    const q = (input.value || '').toLowerCase().trim();
+    const rows = wrap.querySelectorAll('tbody tr');
+    let shown = 0;
+    rows.forEach(tr=>{
+      const text = tr.innerText.toLowerCase();
+      const ok = !q || text.includes(q);
+      tr.style.display = ok ? '' : 'none';
+      if(ok) shown++;
+    });
+    if(count) count.textContent = String(shown);
+  }
+
+  input.addEventListener('input', apply);
+  apply();
+}
+
 function build(){
   const meta = RESULTS.meta || {};
   const stats = RESULTS.stats || {};
@@ -1830,8 +2067,8 @@ function build(){
         <p class="muted">${esc(meta.purpose||'')}</p>
         <p class="muted"><b>Disclaimer:</b> ${esc(meta.disclaimer||'')}</p>
         <div class="badges" style="margin-top:10px;">
-          ${ (RESULTS.framework_hints||[]).map(x=>badge(x,'gray')).join('') }
-          ${ (RESULTS.fingerprints||[]).slice(0,8).map(x=>badge(x,'gray')).join('') }
+          ${(RESULTS.framework_hints||[]).map(x=>badge(x,'gray')).join('')}
+          ${(RESULTS.fingerprints||[]).slice(0,8).map(x=>badge(x,'gray')).join('')}
         </div>
       </div>
       <div class="box">
@@ -1847,9 +2084,9 @@ function build(){
 
   const statsHtml = `
     <div class="stats">
-      <div class="stat">${pill('Assets fetched')}<div class="big">${esc(stats.assets_fetched||0)} / ${esc((RESULTS?.crawl?.enabled ? RESULTS?.stats?.assets_fetched : stats.assets_fetched) || stats.assets_fetched || 0)} </div></div>
+      <div class="stat">${pill('Assets fetched')}<div class="big">${esc(stats.assets_fetched||0)}</div></div>
       <div class="stat">${pill('Maps found')}<div class="big">${esc(stats.maps_found||0)}</div></div>
-      <div class="stat">${pill('Maps fetched')}<div class="big">${esc(stats.maps_fetched||0)} / ${esc((RESULTS?.stats?.maps_fetched != null ? RESULTS.stats.maps_fetched : 0))}</div></div>
+      <div class="stat">${pill('Maps fetched')}<div class="big">${esc(stats.maps_fetched||0)}</div></div>
       <div class="stat">${pill('Pages visited')}<div class="big">${esc(stats.pages_visited||0)} / ${esc((RESULTS?.crawl?.max_pages||0))}</div></div>
       <div class="stat">${pill('AuthZ routes tested')}<div class="big">${esc(stats.authz_routes_tested||0)} / ${esc(RESULTS?.authz_audit?.max_routes||0)}</div></div>
     </div>`;
@@ -1875,18 +2112,62 @@ function build(){
     );
   }
 
- if(RESULTS.screenshots && RESULTS.screenshots.main){
-  cards += `<section class="card full">
-    <div class="card-h"><h2>Screenshot (principal)</h2><div></div></div>
-    <div class="card-b">
-      <p class="muted">Captura automática (si Playwright está instalado).</p>
-      <img class="shot" src="${esc(RESULTS.screenshots.main)}" alt="screenshot"/>
-    </div>
-  </section>`;
-}
+  // Screenshot principal (full row)
+  if(RESULTS.screenshots && RESULTS.screenshots.main){
+    cards += `<details class="card full" open>
+      <summary class="card-h"><h2>Screenshot (principal)</h2><div class="pill">toggle</div></summary>
+      <div class="card-b">
+        <p class="muted">Captura automática (si Playwright está instalado).</p>
+        <img class="shot" src="${esc(RESULTS.screenshots.main)}" alt="screenshot"/>
+      </div>
+    </details>`;
+  }
 
+  // NEW: Backend endpoints summary (compact)
+  const inferred = (RESULTS.endpoints && RESULTS.endpoints.requests_inferred) ? RESULTS.endpoints.requests_inferred : [];
+  const abs = (RESULTS.endpoints && RESULTS.endpoints.absolute) ? RESULTS.endpoints.absolute : [];
+  const rel = (RESULTS.endpoints && RESULTS.endpoints.relative) ? RESULTS.endpoints.relative : [];
+  const gql = (RESULTS.endpoints && RESULTS.endpoints.graphql) ? RESULTS.endpoints.graphql : [];
+  const ws = (RESULTS.endpoints && RESULTS.endpoints.websocket) ? RESULTS.endpoints.websocket : [];
+  const bases = (RESULTS.endpoints && RESULTS.endpoints.base_urls) ? RESULTS.endpoints.base_urls : [];
 
-  // AuthZ audit table (ONE ROW PER ROUTE)
+  const backendRows = [];
+  inferred.slice(0,220).forEach(x=>{
+    backendRows.push([
+      `<div class="badges">${badge((x.method||'UNKNOWN').toUpperCase(),'blue')}</div>`,
+      `<a href="${esc(x.full_url||'')}" target="_blank">${esc(x.full_url||'')}</a>`,
+      `<div class="badges">${(x.params||[]).length ? (x.params||[]).map(p=>badge(p,'gray')).join('') : badge('—','gray')}</div>`,
+      `<div class="badges">${(x.body_keys||[]).length ? (x.body_keys||[]).map(p=>badge(p,'gray')).join('') : badge('—','gray')}</div>`,
+      `<div class="t-mini">${esc(x.evidence||'')}</div>`,
+      `<div class="t-mini">${esc(x.found_in||'')} : ${esc(x.line||'')}</div>`
+    ]);
+  });
+
+  if(backendRows.length || abs.length || rel.length || gql.length || ws.length || bases.length){
+    const extraBadges = `
+      <div class="badges">
+        ${badge(`requests_inferred: ${inferred.length}`,'gray')}
+        ${badge(`absolute: ${abs.length}`,'gray')}
+        ${badge(`relative: ${rel.length}`,'gray')}
+        ${badge(`graphql: ${gql.length}`,'gray')}
+        ${badge(`websocket: ${ws.length}`,'gray')}
+        ${badge(`base_urls: ${bases.length}`,'gray')}
+      </div>
+    `;
+
+    cards += card('Backend endpoints encontrados (resumen)',
+      `
+      ${extraBadges}
+      <div class="controls" style="margin-top:10px">
+        <input id="beSearch" class="search" placeholder="Buscar en endpoints (método/url/params/body)...">
+      </div>
+      <p class="muted">Mostrando <span id="beCount">${Math.min(backendRows.length,220)}</span> de ${backendRows.length} inferidos (fetch/axios/etc).</p>
+      <div id="beTable">${table(['Method','Full URL','Query params','Body keys','Evidence','Found in'], backendRows)}</div>
+      `,'full'
+    );
+  }
+
+  // AuthZ audit table
   const authItems = (RESULTS.authz_audit && RESULTS.authz_audit.items) ? RESULTS.authz_audit.items : [];
   if(authItems.length){
     const controls = `
@@ -1931,7 +2212,7 @@ function build(){
     );
   }
 
-  // Routes discovered (compact)
+  // Routes discovered (with search)
   const routes = (RESULTS.inventory && RESULTS.inventory.routes_full_urls) ? RESULTS.inventory.routes_full_urls : [];
   if(routes.length){
     const rows = routes.slice(0,180).map(r => [
@@ -1941,16 +2222,21 @@ function build(){
       `<code>${esc(r.line ?? '')}</code>`
     ]);
     cards += card('URLs/Rutas detectadas (posibles páginas)',
-      table(['Path','Full URL','Found in','Line'], rows) +
-      `<p class="muted">Mostrando ${Math.min(routes.length,180)} de ${routes.length}.</p>`,'full'
+      `
+      <div class="controls">
+        <input id="routesSearch" class="search" placeholder="Buscar en rutas/URLs...">
+      </div>
+      <p class="muted">Mostrando <span id="routesCount">${Math.min(routes.length,180)}</span> de ${routes.length}.</p>
+      <div id="routesTable">${table(['Path','Full URL','Found in','Line'], rows)}</div>
+      `,'full'
     );
   }
 
-  // Requests inferred (compact)
+  // Requests inferred (with search)
   const reqs = (RESULTS.endpoints && RESULTS.endpoints.requests_inferred) ? RESULTS.endpoints.requests_inferred : [];
   if(reqs.length){
     const rows = reqs.slice(0,200).map(x => [
-      statusBadge(''), // placeholder
+      '',
       `<div class="badges">${badge((x.method||'UNKNOWN').toUpperCase(),'blue')}</div>`,
       `<a href="${esc(x.full_url||'')}" target="_blank">${esc(x.full_url||'')}</a>`,
       `<div class="badges">${(x.params||[]).length ? (x.params||[]).map(p=>badge(p,'gray')).join('') : badge('—','gray')}</div>`,
@@ -1959,8 +2245,13 @@ function build(){
       `<div class="t-mini">${esc(x.found_in||'')} : ${esc(x.line||'')}</div>`
     ]);
     cards += card('Requests inferidos (método + endpoint + hints)',
-      table(['', 'Method','Full URL','Params','Body keys','Evidence','Found in'], rows) +
-      `<p class="muted">Mostrando ${Math.min(reqs.length,200)} de ${reqs.length}.</p>`,'full'
+      `
+      <div class="controls">
+        <input id="reqSearch" class="search" placeholder="Buscar en requests/endpoints...">
+      </div>
+      <p class="muted">Mostrando <span id="reqCount">${Math.min(reqs.length,200)}</span> de ${reqs.length}.</p>
+      <div id="reqTable">${table(['', 'Method','Full URL','Params','Body keys','Evidence','Found in'], rows)}</div>
+      `,'full'
     );
   }
 
@@ -2009,7 +2300,7 @@ function build(){
 
   app.innerHTML = header + statsHtml + `<div class="grid">${cards}${filesCard}</div>` + `<footer>Darkmoon • Security Reporting</footer>`;
 
-  // Wire filters
+  // AuthZ filters
   const authSearch = document.getElementById('authSearch');
   const authCount = document.getElementById('authCount');
   const authTable = document.getElementById('authTable');
@@ -2055,6 +2346,7 @@ function build(){
   if(authSearch) authSearch.addEventListener('input', authApply);
   authApply();
 
+  // Gallery filter
   const galGrid = document.getElementById('galGrid');
   const galSearch = document.getElementById('galSearch');
   const galCount = document.getElementById('galCount');
@@ -2074,6 +2366,11 @@ function build(){
   }
   if(galSearch) galSearch.addEventListener('input', galApply);
   galApply();
+
+  // Generic table searches
+  wireTableSearch('routesSearch', 'routesTable', 'routesCount');
+  wireTableSearch('reqSearch', 'reqTable', 'reqCount');
+  wireTableSearch('beSearch', 'beTable', 'beCount');
 }
 
 build();
