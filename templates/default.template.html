@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Darkmoon Report • {{TITLE}}</title>
+  <style>
+    :root{
+      --bg:#0b0f14; --panel:#0f1620; --card:#101a26; --border:#1b2a3a;
+      --txt:#e6f1ff; --muted:#98a7b8; --accent:#7cffb0; --accent2:#bc13fe;
+      --red:#ff5a7a; --amber:#ffd166; --green:#4cffb5;
+    }
+    *{box-sizing:border-box}
+    body{margin:0;font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial;background:radial-gradient(1200px 800px at 30% 10%, #132133 0%, var(--bg) 60%); color:var(--txt)}
+    a{color:var(--accent)}
+    code{background:rgba(255,255,255,0.05);padding:2px 6px;border-radius:8px;border:1px solid rgba(255,255,255,0.08)}
+    .wrap{max-width:1240px;margin:auto;padding:22px}
+    h1{margin:0;font-size:22px;color:var(--accent2)}
+    h2{margin:0;font-size:16px}
+    .muted{color:var(--muted)}
+    .top{display:flex;gap:16px;flex-wrap:wrap;align-items:stretch}
+    .box{flex:1;min-width:320px;background:linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01));border:1px solid var(--border);border-radius:14px;padding:14px}
+    .pill{display:inline-block;padding:4px 10px;border-radius:999px;border:1px solid var(--border);background:rgba(255,255,255,0.03);color:var(--muted);font-size:12px}
+    .big{margin-top:6px;font-size:14px;word-break:break-all}
+    .stats{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0}
+    .stat{flex:1;min-width:220px;background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:12px}
+    .grid{display:grid;grid-template-columns:1fr;gap:14px}
+    @media (min-width: 920px) {.grid{grid-template-columns:1fr 1fr}}
+    .card{background:var(--card);border:1px solid var(--border);border-radius:16px;overflow:hidden}
+    .card-h{padding:12px 14px;border-bottom:1px solid var(--border);background:rgba(255,255,255,0.02)}
+    .card-b{padding:12px 14px}
+    .badges{display:flex;flex-wrap:wrap;gap:8px}
+    .badge{padding:6px 10px;border-radius:999px;background:rgba(124,255,176,0.08);border:1px solid rgba(124,255,176,0.25);color:var(--accent);font-size:12px}
+    .pre{background:#08101a;border:1px solid var(--border);padding:10px;border-radius:12px;overflow:auto;color:#ffeb3b;max-height:420px}
+    .tbl{width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed}
+    .tbl th,.tbl td{border-bottom:1px solid rgba(255,255,255,0.07);padding:8px 8px;vertical-align:top}
+    .tbl th{text-align:left;color:var(--muted);font-weight:600;background:rgba(255,255,255,0.02)}
+    .tbl td{word-break:break-word}
+    .shot{width:100%;border-radius:12px;border:1px solid var(--border);margin-top:10px}
+    footer{text-align:center;color:var(--muted);margin:16px 0 6px;font-size:12px}
+
+    details.route{border:1px solid var(--border);border-radius:14px;background:rgba(255,255,255,0.02);padding:10px 12px}
+    details.route summary{cursor:pointer;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+    details.route summary::-webkit-details-marker{display:none}
+    .path{font-family:ui-monospace, Menlo, Consolas, monospace;color:var(--accent);font-size:12px}
+    .url{color:var(--muted);font-size:12px;word-break:break-all}
+    .route-body{padding:10px 2px}
+    .cols{display:grid;grid-template-columns:1fr;gap:12px}
+    @media (min-width: 980px){.cols{grid-template-columns:1fr 1fr}}
+    .col{border:1px solid rgba(255,255,255,0.06);border-radius:14px;padding:10px;background:rgba(0,0,0,0.12)}
+    .col h4{margin:0 0 8px 0;color:var(--accent)}
+    .kvrow{display:flex;gap:10px;margin:6px 0}
+    .kvrow .k{width:82px;color:var(--muted)}
+    .kvrow .v{flex:1;word-break:break-all}
+    .thumb{width:100%;max-height:380px;object-fit:cover;border-radius:12px;border:1px solid rgba(255,255,255,0.08);margin-top:8px}
+    .shotwrap{display:block}
+    .noshot{margin-top:8px;color:var(--muted)}
+    .reason{margin:6px 0 10px 0;color:var(--txt)}
+    .bad-red{background:rgba(255,90,122,0.12)!important;border-color:rgba(255,90,122,0.35)!important;color:var(--red)!important}
+    .bad-amber{background:rgba(255,209,102,0.12)!important;border-color:rgba(255,209,102,0.35)!important;color:var(--amber)!important}
+    .bad-green{background:rgba(76,255,181,0.12)!important;border-color:rgba(76,255,181,0.35)!important;color:var(--green)!important}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="top">
+      <div style="flex:1;min-width:320px">
+        <h1>Darkmoon • Public Exposure Report</h1>
+        <p class="muted">{{PURPOSE}}</p>
+        <p class="muted"><b>Disclaimer:</b> {{DISCLAIMER}}</p>
+      </div>
+      <div class="box">
+        <div class="pill">Target</div>
+        <div class="big">{{TARGET}}</div>
+
+        <div class="pill" style="margin-top:10px;">Final URL</div>
+        <div class="big">{{FINAL_URL}}</div>
+
+        <div class="pill" style="margin-top:10px;">Timestamp</div>
+        <div class="big">{{TIMESTAMP}}</div>
+
+        <div class="pill" style="margin-top:10px;">Auth headers</div>
+        <div class="big">{{AUTH_HEADERS}}</div>
+
+        <div class="pill" style="margin-top:10px;">AuthZ audit</div>
+        <div class="big">{{AUTHZ_AUDIT}}</div>
+      </div>
+    </div>
+
+    <div class="stats">
+      <div class="stat"><div class="pill">Assets fetched</div><div class="big">{{ASSETS_FETCHED}} / {{MAX_ASSETS}}</div></div>
+      <div class="stat"><div class="pill">Maps found</div><div class="big">{{MAPS_FOUND}}</div></div>
+      <div class="stat"><div class="pill">Maps fetched</div><div class="big">{{MAPS_FETCHED}} / {{MAX_MAPS}}</div></div>
+      <div class="stat"><div class="pill">Pages visited</div><div class="big">{{PAGES_VISITED}} / {{MAX_PAGES}}</div></div>
+    </div>
+
+    <div class="grid">
+      <section class="card">
+        <div class="card-h"><h2>Tecnologías (Wappalyzer)</h2></div>
+        <div class="card-b"><div class="badges">{{TECH_BADGES}}</div></div>
+      </section>
+
+      <section class="card">
+        <div class="card-h"><h2>Fingerprints</h2></div>
+        <div class="card-b"><div class="badges">{{FINGERPRINT_BADGES}}</div></div>
+      </section>
+
+      <section class="card">
+        <div class="card-h"><h2>Backend hints</h2></div>
+        <div class="card-b"><ul class="muted">{{BACKEND_HINTS}}</ul></div>
+      </section>
+
+      <section class="card">
+        <div class="card-h"><h2>Headers (selección)</h2></div>
+        <div class="card-b">{{HEADERS_KV}}</div>
+      </section>
+
+      <section class="card">
+        <div class="card-h"><h2>Screenshot (principal)</h2></div>
+        <div class="card-b">{{MAIN_SCREENSHOT}}</div>
+      </section>
+
+      <section class="card" style="grid-column:1/-1">
+        <div class="card-h"><h2>Rutas detectadas (JS/DOM)</h2></div>
+        <div class="card-b">{{ROUTES_TABLE}}</div>
+      </section>
+
+      <section class="card" style="grid-column:1/-1">
+        <div class="card-h"><h2>AuthZ audit por ruta (con pantallazos)</h2></div>
+        <div class="card-b">
+          <p class="muted">Abre cada ítem para ver UNAUTH vs AUTH + screenshots + evidencia. Ordenado por sospechosas primero.</p>
+          {{AUTHZ_ROUTES}}
+        </div>
+      </section>
+
+      <section class="card" style="grid-column:1/-1">
+        <div class="card-h"><h2>Archivos generados</h2></div>
+        <div class="card-b">
+          <div class="badges">
+            <span class="badge">results.json</span>
+            <span class="badge">index.html</span>
+            <span class="badge">routes/*.txt</span>
+            <span class="badge">routes_authz/*.txt</span>
+            <span class="badge">screens/*.png</span>
+          </div>
+          <p class="muted" style="margin-top:10px;">Ruta: <code>{{OUTDIR}}</code></p>
+        </div>
+      </section>
+    </div>
+
+    <footer>Darkmoon • Security Reporting</footer>
+  </div>
+</body>
+</html>
