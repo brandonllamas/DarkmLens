@@ -233,6 +233,59 @@ class DarkmLens:
     VUE_HINT_RE = re.compile(r'\bVue\b|vue-router|__VUE__|data-v-', re.IGNORECASE)
     SVELTE_HINT_RE = re.compile(r'\bsvelte\b|__SVELTE__', re.IGNORECASE)
     NUxT_HINT_RE = re.compile(r'__NUXT__|nuxt', re.IGNORECASE)
+    REMIX_HINT_RE = re.compile(r'__remixContext|@remix-run|remix\.run', re.IGNORECASE)
+    GATSBY_HINT_RE = re.compile(r'___gatsby|gatsby-chunk|gatsby-browser', re.IGNORECASE)
+    ASTRO_HINT_RE = re.compile(r'astro:page-load|astro-island|@astrojs', re.IGNORECASE)
+
+    # ── Python / backend frameworks ───────────────────────────────────────
+    DJANGO_HINTS_RE = re.compile(r'csrfmiddlewaretoken|django|DJANGO_SETTINGS|python-requests', re.IGNORECASE)
+    FLASK_HINTS_RE = re.compile(r'\bFlask\b|Werkzeug|flask_login|flask_wtf', re.IGNORECASE)
+    FASTAPI_HINTS_RE = re.compile(r'\bFastAPI\b|uvicorn|starlette|/openapi\.json\b', re.IGNORECASE)
+    LARAVEL_HINTS_RE = re.compile(r'\blaravel\b|illuminate|XSRF-TOKEN|laravel_session', re.IGNORECASE)
+    RAILS_HINTS_RE = re.compile(r'\bRails\b|ActionController|Turbolinks|rails-ujs', re.IGNORECASE)
+    SPRING_HINTS_RE = re.compile(r'Spring|Tomcat|/actuator/|org\.springframework', re.IGNORECASE)
+    DOTNET_HINTS_RE = re.compile(r'\bBlazor\b|aspnet|\.aspx\b|asp\.net', re.IGNORECASE)
+    WORDPRESS_HINTS_RE = re.compile(r'wp-content|wp-includes|wp-json|WordPress', re.IGNORECASE)
+    SHOPIFY_HINTS_RE = re.compile(r'Shopify\.theme|shopify\.com|cdn\.shopify\.com', re.IGNORECASE)
+
+    # ── Supabase ──────────────────────────────────────────────────────────
+    SUPABASE_URL_RE = re.compile(r'https?://[a-z0-9]+\.supabase\.(?:co|com)', re.IGNORECASE)
+    SUPABASE_KEY_RE = re.compile(r'supabaseUrl|supabaseKey|SUPABASE_URL|SUPABASE_ANON_KEY|NEXT_PUBLIC_SUPABASE', re.IGNORECASE)
+    SUPABASE_TABLE_RE = re.compile(r'\.from\s*\(\s*["\']([a-zA-Z0-9_-]{1,80})["\']\s*\)', re.IGNORECASE)
+
+    # ── Auth0 ─────────────────────────────────────────────────────────────
+    AUTH0_DOMAIN_RE = re.compile(r'([a-zA-Z0-9-]+\.(?:us\d+\.|eu\.|au\.)?auth0\.com)', re.IGNORECASE)
+    AUTH0_HINT_RE = re.compile(r'auth0|Auth0Provider|useAuth0|createAuth0Client|@auth0/', re.IGNORECASE)
+
+    # ── Clerk ─────────────────────────────────────────────────────────────
+    CLERK_HINT_RE = re.compile(r'clerk\.dev|clerk\.com|@clerk/|ClerkProvider|useClerk', re.IGNORECASE)
+
+    # ── Stripe ────────────────────────────────────────────────────────────
+    STRIPE_HINT_RE = re.compile(r'stripe\.com|js\.stripe\.com|\bStripe\s*\(', re.IGNORECASE)
+    STRIPE_KEY_RE = re.compile(r'\b(pk_(?:live|test)_[a-zA-Z0-9]{24,})', re.IGNORECASE)
+
+    # ── Other third-party services ────────────────────────────────────────
+    MIXPANEL_RE = re.compile(r'mixpanel\.track|api\.mixpanel\.com|mixpanel\.init|mixpanel\.identify', re.IGNORECASE)
+    INTERCOM_RE = re.compile(r'intercomSettings|intercom\.io|widget\.intercom\.io|Intercom\(', re.IGNORECASE)
+    PUSHER_RE = re.compile(r'pusher\.com|new\s+Pusher\s*\(|pusher-js|pusherKey', re.IGNORECASE)
+    ALGOLIA_RE = re.compile(r'algolia\.net|algoliasearch\s*\(|\.algolia\.com', re.IGNORECASE)
+    GMAPS_RE = re.compile(r'maps\.googleapis\.com|google\.maps\.|initMap\s*\(|@googlemaps/', re.IGNORECASE)
+    MAPBOX_HINT_RE = re.compile(r'mapbox\.com|mapboxgl\.Map|mapboxgl\.accessToken|@mapbox/', re.IGNORECASE)
+    MAPBOX_TOKEN_RE = re.compile(r'\b(pk\.[a-zA-Z0-9._-]{60,})', re.IGNORECASE)
+    TWILIO_RE = re.compile(r'twilio\.com|@twilio/|TwilioVideo|twilio-video', re.IGNORECASE)
+    ONESIGNAL_RE = re.compile(r'onesignal\.com|OneSignal\.init|OneSignalSDK', re.IGNORECASE)
+    RECAPTCHA_RE = re.compile(r'recaptcha\.net|google\.com/recaptcha|grecaptcha\.execute|hcaptcha\.com', re.IGNORECASE)
+    HOTJAR_RE = re.compile(r'hotjar\.com|hjSiteSettings|_hjSettings', re.IGNORECASE)
+    DATADOG_RE = re.compile(r'datadoghq\.com|DD_RUM|datadogRum\.init', re.IGNORECASE)
+    LAUNCHDARKLY_RE = re.compile(r'launchdarkly\.com|LDClient|@launchdarkly/', re.IGNORECASE)
+    AMPLITUDE_RE = re.compile(r'amplitude\.com|amplitude\.getInstance|@amplitude/', re.IGNORECASE)
+    POSTHOG_RE = re.compile(r'posthog\.com|posthog\.init|posthog\.capture', re.IGNORECASE)
+
+    # ── Route type classifier ─────────────────────────────────────────────
+    BACKEND_PATH_RE = re.compile(
+        r'^\/(?:api|graphql|gql|rest|services|v\d+[\/]|auth|oauth|token|webhook|webhooks|ws|socket\.io|rpc|trpc|swagger|openapi|actuator|admin\/api|_next\/data)',
+        re.IGNORECASE
+    )
 
     def __init__(
         self,
@@ -374,9 +427,36 @@ class DarkmLens:
             "firebase": {
                 "detected": False,
                 "configs": [],
+                "configs_parsed": [],
                 "firestore_rest": [],
                 "rtdb": [],
                 "collections_probable": [],
+            },
+            "stack_summary": {
+                "app_type": None,
+                "frontend_frameworks": [],
+                "backend_frameworks": [],
+                "services": [],
+            },
+            "third_party_services": {
+                "supabase": {"detected": False, "urls": [], "tables": [], "key_hints": []},
+                "auth0": {"detected": False, "domains": []},
+                "clerk": {"detected": False},
+                "stripe": {"detected": False, "public_keys": []},
+                "mixpanel": {"detected": False},
+                "intercom": {"detected": False},
+                "pusher": {"detected": False},
+                "algolia": {"detected": False},
+                "google_maps": {"detected": False},
+                "mapbox": {"detected": False, "tokens": []},
+                "twilio": {"detected": False},
+                "onesignal": {"detected": False},
+                "recaptcha": {"detected": False},
+                "hotjar": {"detected": False},
+                "datadog": {"detected": False},
+                "launchdarkly": {"detected": False},
+                "amplitude": {"detected": False},
+                "posthog": {"detected": False},
             },
             "exposed_configs": {
                 "aws_amplify_cognito": [],
@@ -502,6 +582,49 @@ class DarkmLens:
             fw.append("Svelte (heurístico)")
         if self.NUxT_HINT_RE.search(html or ""):
             fw.append("Nuxt (heurístico)")
+        if self.REMIX_HINT_RE.search(html or ""):
+            fw.append("Remix (heurístico)")
+        if self.GATSBY_HINT_RE.search(html or ""):
+            fw.append("Gatsby (heurístico)")
+        if self.ASTRO_HINT_RE.search(html or ""):
+            fw.append("Astro (heurístico)")
+
+        # Backend framework detection from HTML/headers
+        if self.DJANGO_HINTS_RE.search(html or ""):
+            backend.append("Django (Python) (heurístico)")
+        if self.FLASK_HINTS_RE.search(html or ""):
+            backend.append("Flask (Python) (heurístico)")
+        if self.FASTAPI_HINTS_RE.search(html or ""):
+            backend.append("FastAPI (Python) (heurístico)")
+        if self.LARAVEL_HINTS_RE.search(html or ""):
+            backend.append("Laravel (PHP) (heurístico)")
+        if self.RAILS_HINTS_RE.search(html or ""):
+            backend.append("Ruby on Rails (heurístico)")
+        if self.SPRING_HINTS_RE.search(html or ""):
+            backend.append("Spring Boot (Java) (heurístico)")
+        if self.DOTNET_HINTS_RE.search(html or ""):
+            backend.append("ASP.NET / .NET (heurístico)")
+        if self.WORDPRESS_HINTS_RE.search(html or ""):
+            backend.append("WordPress (PHP) (heurístico)")
+        if self.SHOPIFY_HINTS_RE.search(html or ""):
+            backend.append("Shopify (heurístico)")
+
+        # Also check headers for backend hints
+        for h_name, h_val in (headers or {}).items():
+            hl = h_name.lower()
+            hv = (h_val or "").lower()
+            if hl == "x-powered-by":
+                if "express" in hv:
+                    backend.append("Express.js / Node.js (x-powered-by)")
+                elif "php" in hv:
+                    backend.append(f"PHP ({h_val}) (x-powered-by)")
+                elif "asp.net" in hv:
+                    backend.append(f"ASP.NET ({h_val}) (x-powered-by)")
+            if hl == "server":
+                if "gunicorn" in hv or "uvicorn" in hv:
+                    backend.append(f"Python WSGI/ASGI ({h_val}) (server header)")
+                if "tomcat" in hv:
+                    backend.append(f"Java/Tomcat ({h_val}) (server header)")
 
         sec = []
         for h in ["Content-Security-Policy", "Strict-Transport-Security", "X-Frame-Options",
@@ -595,6 +718,103 @@ class DarkmLens:
         s = (s or "").strip()
         s = re.sub(r"\s+", " ", s)
         return s[:max_len] + ("…" if len(s) > max_len else "")
+
+    def _classify_route_type(self, path: str) -> str:
+        """Returns 'backend' if path looks like an API endpoint, else 'frontend'."""
+        if self.BACKEND_PATH_RE.match(path or "/"):
+            return "backend"
+        return "frontend"
+
+    def _parse_firebase_config(self, blob: str) -> dict:
+        """Parse a raw Firebase config blob and extract individual fields."""
+        out = {}
+        for key in ["apiKey", "authDomain", "projectId", "storageBucket",
+                    "messagingSenderId", "appId", "measurementId", "databaseURL"]:
+            m = re.search(rf'["\']?{key}["\']?\s*[:=]\s*["\']([^"\']+)["\']', blob, re.IGNORECASE)
+            if m:
+                out[key] = m.group(1)
+        return out
+
+    def _detect_third_party(self, text: str, source_name: str):
+        """Detect third-party services in JS/HTML text."""
+        tp = self.results["third_party_services"]
+
+        # Supabase
+        if self.SUPABASE_URL_RE.search(text) or self.SUPABASE_KEY_RE.search(text):
+            with self._results_lock:
+                tp["supabase"]["detected"] = True
+            for m in self.SUPABASE_URL_RE.finditer(text):
+                url = m.group(0)
+                with self._results_lock:
+                    if url not in tp["supabase"]["urls"]:
+                        tp["supabase"]["urls"].append(url)
+            for m in self.SUPABASE_TABLE_RE.finditer(text):
+                tbl = m.group(1)
+                with self._results_lock:
+                    if tbl not in tp["supabase"]["tables"]:
+                        tp["supabase"]["tables"].append(tbl)
+            if self.SUPABASE_KEY_RE.search(text):
+                with self._results_lock:
+                    if source_name not in tp["supabase"]["key_hints"]:
+                        tp["supabase"]["key_hints"].append(source_name)
+
+        # Auth0
+        if self.AUTH0_HINT_RE.search(text) or self.AUTH0_DOMAIN_RE.search(text):
+            with self._results_lock:
+                tp["auth0"]["detected"] = True
+            for m in self.AUTH0_DOMAIN_RE.finditer(text):
+                dom = m.group(1)
+                with self._results_lock:
+                    if dom not in tp["auth0"]["domains"]:
+                        tp["auth0"]["domains"].append(dom)
+
+        # Clerk
+        if self.CLERK_HINT_RE.search(text):
+            with self._results_lock:
+                tp["clerk"]["detected"] = True
+
+        # Stripe
+        if self.STRIPE_HINT_RE.search(text):
+            with self._results_lock:
+                tp["stripe"]["detected"] = True
+        for m in self.STRIPE_KEY_RE.finditer(text):
+            key = m.group(1)
+            with self._results_lock:
+                if key not in tp["stripe"]["public_keys"]:
+                    tp["stripe"]["public_keys"].append(key)
+                    tp["stripe"]["detected"] = True
+
+        # Mapbox
+        if self.MAPBOX_HINT_RE.search(text):
+            with self._results_lock:
+                tp["mapbox"]["detected"] = True
+        for m in self.MAPBOX_TOKEN_RE.finditer(text):
+            tok = m.group(1)
+            with self._results_lock:
+                if tok not in tp["mapbox"]["tokens"]:
+                    tp["mapbox"]["tokens"].append(tok)
+                    tp["mapbox"]["detected"] = True
+
+        # Simple detections (boolean only)
+        simple = [
+            ("mixpanel", self.MIXPANEL_RE),
+            ("intercom", self.INTERCOM_RE),
+            ("pusher", self.PUSHER_RE),
+            ("algolia", self.ALGOLIA_RE),
+            ("google_maps", self.GMAPS_RE),
+            ("twilio", self.TWILIO_RE),
+            ("onesignal", self.ONESIGNAL_RE),
+            ("recaptcha", self.RECAPTCHA_RE),
+            ("hotjar", self.HOTJAR_RE),
+            ("datadog", self.DATADOG_RE),
+            ("launchdarkly", self.LAUNCHDARKLY_RE),
+            ("amplitude", self.AMPLITUDE_RE),
+            ("posthog", self.POSTHOG_RE),
+        ]
+        for name, rx in simple:
+            if rx.search(text):
+                with self._results_lock:
+                    tp[name]["detected"] = True
 
     def _extract_object_keys_hint(self, obj_text: str, max_keys: int = 25) -> List[str]:
         if not obj_text:
@@ -883,6 +1103,9 @@ class DarkmLens:
                 blob = m.group(1).strip()
                 ln = line_number_from_index(text, m.start())
                 self.add_finding(self.results["firebase"]["configs"], {"blob": blob, "found_in": source_name, "line": ln})
+                parsed = self._parse_firebase_config(blob)
+                if parsed:
+                    self.add_finding(self.results["firebase"]["configs_parsed"], {"fields": parsed, "found_in": source_name, "line": ln})
 
         if "collection(" in text or "collectionGroup(" in text:
             with self._results_lock:
@@ -955,6 +1178,10 @@ class DarkmLens:
                     "line": line_number_from_index(text, m.start()),
                     "evidence": f"rtdb {project}.firebaseio.com"
                 })
+
+        # Third-party service detection
+        if source_kind in ("js", "html"):
+            self._detect_third_party(text, source_name)
 
     # -----------------------------
     # Sourcemaps
@@ -1655,6 +1882,123 @@ class DarkmLens:
             self.results["authz_audit"]["items"] = items
 
     # -----------------------------
+    # App stack identification
+    # -----------------------------
+    def _identify_app_stack(self):
+        """Build a human-readable summary of the detected app stack."""
+        with self._results_lock:
+            fps = list(self.results.get("fingerprints") or [])
+            fw = list(self.results.get("framework_hints") or [])
+            backend = list(self.results.get("backend_hints") or [])
+            techs = list(self.results.get("technologies") or [])
+
+        frontend_fw: List[str] = []
+        backend_fw: List[str] = []
+
+        all_hints = " ".join(fps + fw + techs).lower()
+
+        # Frontend framework detection
+        if "next.js" in all_hints or "nextjs" in all_hints or self.results.get("nextjs", {}).get("detected"):
+            frontend_fw.append("Next.js")
+        if "react" in all_hints and "Next.js" not in frontend_fw:
+            frontend_fw.append("React")
+        if "angular" in all_hints:
+            frontend_fw.append("Angular")
+        if "nuxt" in all_hints:
+            frontend_fw.append("Nuxt")
+        if "vue" in all_hints and "Nuxt" not in frontend_fw:
+            frontend_fw.append("Vue")
+        if "svelte" in all_hints:
+            frontend_fw.append("Svelte")
+        if "remix" in all_hints:
+            frontend_fw.append("Remix")
+        if "gatsby" in all_hints:
+            frontend_fw.append("Gatsby")
+        if "astro" in all_hints:
+            frontend_fw.append("Astro")
+
+        # Backend framework detection from backend_hints
+        for hint in backend:
+            hl = hint.lower()
+            if "django" in hl and "Django" not in backend_fw:
+                backend_fw.append("Django (Python)")
+            if "flask" in hl and "Flask" not in backend_fw:
+                backend_fw.append("Flask (Python)")
+            if "fastapi" in hl and "FastAPI" not in backend_fw:
+                backend_fw.append("FastAPI (Python)")
+            if "laravel" in hl and "Laravel" not in backend_fw:
+                backend_fw.append("Laravel (PHP)")
+            if "ruby on rails" in hl and "Ruby on Rails" not in backend_fw:
+                backend_fw.append("Ruby on Rails")
+            if "spring" in hl and "Spring Boot" not in backend_fw:
+                backend_fw.append("Spring Boot (Java)")
+            if "asp.net" in hl or ".net" in hl:
+                if "ASP.NET" not in backend_fw:
+                    backend_fw.append("ASP.NET")
+            if "express" in hl and "Express.js" not in backend_fw:
+                backend_fw.append("Express.js (Node)")
+            if "node" in hl and "Node.js" not in backend_fw:
+                backend_fw.append("Node.js")
+            if "php" in hl and "PHP" not in backend_fw and "Laravel" not in str(backend_fw):
+                backend_fw.append("PHP")
+            if "wordpress" in hl and "WordPress" not in backend_fw:
+                backend_fw.append("WordPress (PHP)")
+            if "shopify" in hl and "Shopify" not in backend_fw:
+                backend_fw.append("Shopify")
+            if ("gunicorn" in hl or "uvicorn" in hl or "wsgi" in hl or "asgi" in hl) and "Python WSGI/ASGI" not in backend_fw:
+                backend_fw.append("Python WSGI/ASGI")
+            if ("tomcat" in hl or "java" in hl) and "Java/Tomcat" not in backend_fw:
+                backend_fw.append("Java/Tomcat")
+
+        # Services
+        services: List[str] = []
+        with self._results_lock:
+            tp = self.results.get("third_party_services") or {}
+            tp_labels = {
+                "supabase": "Supabase", "auth0": "Auth0", "clerk": "Clerk",
+                "stripe": "Stripe", "mixpanel": "Mixpanel", "intercom": "Intercom",
+                "pusher": "Pusher", "algolia": "Algolia", "google_maps": "Google Maps",
+                "mapbox": "Mapbox", "twilio": "Twilio", "onesignal": "OneSignal",
+                "recaptcha": "reCAPTCHA/hCaptcha", "hotjar": "Hotjar",
+                "datadog": "DataDog", "launchdarkly": "LaunchDarkly",
+                "amplitude": "Amplitude", "posthog": "PostHog",
+            }
+            for key, label in tp_labels.items():
+                if tp.get(key, {}).get("detected"):
+                    services.append(label)
+
+            if self.results.get("firebase", {}).get("detected"):
+                services.append("Firebase")
+            if self.results.get("exposed_configs", {}).get("aws_amplify_cognito"):
+                services.append("AWS Cognito")
+            if self.results.get("exposed_configs", {}).get("aws_appsync_amplify"):
+                services.append("AWS AppSync")
+            if self.results.get("exposed_configs", {}).get("sentry"):
+                services.append("Sentry")
+            if self.results.get("exposed_configs", {}).get("google_analytics"):
+                services.append("Google Analytics")
+            if self.results.get("exposed_configs", {}).get("segment"):
+                services.append("Segment")
+
+        # App type summary
+        if frontend_fw and backend_fw:
+            app_type = f"{' + '.join(frontend_fw)} | {' + '.join(backend_fw)}"
+        elif frontend_fw:
+            app_type = f"{' + '.join(frontend_fw)} SPA/SSR"
+        elif backend_fw:
+            app_type = f"Server-side ({' + '.join(backend_fw)})"
+        else:
+            app_type = "Web App (sin framework identificado)"
+
+        with self._results_lock:
+            self.results["stack_summary"] = {
+                "app_type": app_type,
+                "frontend_frameworks": frontend_fw,
+                "backend_frameworks": backend_fw,
+                "services": services,
+            }
+
+    # -----------------------------
     # Dedup
     # -----------------------------
     def _dedup_findings(self):
@@ -1736,6 +2080,14 @@ class DarkmLens:
                 ai2.append(it)
             if "authz_audit" in self.results:
                 self.results["authz_audit"]["items"] = ai2
+
+            # Classify each route as frontend or backend
+            for r in self.results["inventory"]["routes_full_urls"]:
+                if "route_type" not in r:
+                    r["route_type"] = self._classify_route_type(r.get("path") or "/")
+
+        # Build app stack summary
+        self._identify_app_stack()
 
     # -----------------------------
     # HTML Report rendering
@@ -1906,471 +2258,710 @@ def main():
 
 # =============================
 # Default HTML template written to out/report.template.html
-# (Tu template original se mantiene tal cual)
 # =============================
 DEFAULT_REPORT_TEMPLATE = r"""<!doctype html>
 <html lang="es">
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>Darkmoon Report</title>
+  <title>DarkmLens — Reporte de Exposición</title>
   <style>
-   .full { width: 100%; grid-column: 1 / -1; }
     :root{
-      --bg:#0b0f14; --panel:#0f1620; --card:#101a26; --border:#1b2a3a;
-      --txt:#e6f1ff; --muted:#98a7b8; --accent:#7cffb0; --accent2:#bc13fe;
-      --red:#ff5b5b; --orange:#ffb020; --blue:#57a3ff;
+      --bg:#07090d; --panel:#0d1117; --card:#0f1622; --border:#1a2535;
+      --txt:#dce8f5; --muted:#7d8fa3; --accent:#4fffb0; --accent2:#b24bfe;
+      --red:#ff4d6d; --orange:#ffaa00; --blue:#3fa0ff; --purple:#9d4edd;
+      --green:#20c997; --yellow:#ffd166;
     }
-    *{box-sizing:border-box}
-    body{margin:0;font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial;background:radial-gradient(1200px 800px at 30% 10%, #132133 0%, var(--bg) 60%); color:var(--txt)}
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,Arial;background:var(--bg);color:var(--txt);min-height:100vh}
+    body::before{content:'';position:fixed;top:0;left:0;right:0;height:500px;background:radial-gradient(ellipse 80% 60% at 50% -10%,rgba(75,150,255,0.08) 0%,transparent 70%);pointer-events:none}
     a{color:var(--accent);text-decoration:none}
     a:hover{text-decoration:underline}
-    code{background:rgba(255,255,255,0.05);padding:2px 6px;border-radius:8px;border:1px solid rgba(255,255,255,0.08)}
-    .wrap{max-width:1280px;margin:auto;padding:22px}
-    .top{display:flex;gap:16px;flex-wrap:wrap;align-items:stretch}
-    h1{margin:0;font-size:22px;color:var(--accent2)}
-    h2{margin:0;font-size:16px}
-    h3{margin:14px 0 8px;color:var(--accent)}
-    .muted{color:var(--muted);margin:6px 0}
-    .box{flex:1;min-width:320px;background:linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.01));border:1px solid var(--border);border-radius:14px;padding:14px}
-    .stats{display:flex;gap:10px;flex-wrap:wrap;margin:14px 0}
-    .stat{flex:1;min-width:220px;background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:12px}
-    .pill{display:inline-block;padding:4px 10px;border-radius:999px;border:1px solid var(--border);background:rgba(255,255,255,0.03);color:var(--muted);font-size:12px}
-    .big{margin-top:6px;font-size:14px;word-break:break-all}
-    .grid{display:grid;grid-template-columns:1fr;gap:14px}
-    @media (min-width: 920px) {.grid{grid-template-columns:1fr 1fr}}
+    code{background:rgba(255,255,255,0.05);padding:2px 7px;border-radius:6px;border:1px solid rgba(255,255,255,0.07);font-family:monospace;font-size:11px}
+    .wrap{max-width:1340px;margin:0 auto;padding:28px 20px}
+
+    /* ── NAV ── */
+    .nav{display:flex;align-items:center;gap:12px;flex-wrap:wrap;border-bottom:1px solid var(--border);padding-bottom:18px;margin-bottom:24px}
+    .nav-logo{font-size:20px;font-weight:700;letter-spacing:-0.5px}
+    .nav-logo span{color:var(--accent2)}
+    .nav-badge{padding:3px 10px;border-radius:999px;border:1px solid rgba(177,75,254,0.35);background:rgba(177,75,254,0.07);color:var(--accent2);font-size:11px;font-weight:600}
+    .nav-right{margin-left:auto;color:var(--muted);font-size:12px}
+
+    /* ── HERO ── */
+    .hero{display:grid;grid-template-columns:1fr auto;gap:20px;align-items:start;margin-bottom:24px}
+    @media(max-width:700px){.hero{grid-template-columns:1fr}}
+    .hero-title{font-size:28px;font-weight:700;line-height:1.2;margin-bottom:8px}
+    .hero-title .hl{color:var(--accent)}
+    .hero-url{font-size:13px;color:var(--muted);word-break:break-all;margin-bottom:12px}
+    .hero-meta{display:flex;gap:8px;flex-wrap:wrap}
+    .meta-pill{display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border-radius:999px;border:1px solid var(--border);background:rgba(255,255,255,0.02);font-size:12px;color:var(--muted)}
+    .meta-pill b{color:var(--txt)}
+    .hero-box{min-width:260px;background:rgba(255,255,255,0.02);border:1px solid var(--border);border-radius:14px;padding:16px}
+
+    /* ── APP STACK ── */
+    .stack-card{background:linear-gradient(135deg,rgba(79,255,176,0.04) 0%,rgba(177,75,254,0.06) 100%);border:1px solid rgba(79,255,176,0.15);border-radius:16px;padding:20px;margin-bottom:24px}
+    .stack-title{font-size:13px;font-weight:600;color:var(--accent);text-transform:uppercase;letter-spacing:.08em;margin-bottom:14px}
+    .stack-type{font-size:22px;font-weight:700;margin-bottom:16px;color:var(--txt)}
+    .stack-cols{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+    @media(max-width:700px){.stack-cols{grid-template-columns:1fr}}
+    .stack-col-label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px}
+    .fw-badge{display:inline-flex;align-items:center;gap:6px;padding:7px 14px;border-radius:999px;font-size:13px;font-weight:600;margin:3px}
+    .fw-fe{background:rgba(63,160,255,0.10);border:1px solid rgba(63,160,255,0.30);color:var(--blue)}
+    .fw-be{background:rgba(157,78,221,0.10);border:1px solid rgba(157,78,221,0.30);color:var(--purple)}
+    .fw-svc{background:rgba(79,255,176,0.08);border:1px solid rgba(79,255,176,0.20);color:var(--accent)}
+
+    /* ── STATS ROW ── */
+    .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:24px}
+    .stat{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:16px;text-align:center}
+    .stat-n{font-size:28px;font-weight:700;color:var(--accent);line-height:1}
+    .stat-l{font-size:11px;color:var(--muted);margin-top:6px;text-transform:uppercase;letter-spacing:.05em}
+
+    /* ── SECTIONS/TABS ── */
+    .section{margin-bottom:28px}
+    .section-h{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:8px}
+    .section-title{font-size:16px;font-weight:700;display:flex;align-items:center;gap:10px}
+    .section-title .ico{width:28px;height:28px;border-radius:8px;display:inline-flex;align-items:center;justify-content:center;font-size:14px}
+    .ico-blue{background:rgba(63,160,255,0.12);color:var(--blue)}
+    .ico-purple{background:rgba(157,78,221,0.12);color:var(--purple)}
+    .ico-orange{background:rgba(255,170,0,0.12);color:var(--orange)}
+    .ico-green{background:rgba(32,201,151,0.12);color:var(--green)}
+    .ico-red{background:rgba(255,77,109,0.12);color:var(--red)}
+    .ico-accent{background:rgba(79,255,176,0.12);color:var(--accent)}
+    .count-badge{padding:3px 10px;border-radius:999px;background:rgba(255,255,255,0.06);border:1px solid var(--border);color:var(--muted);font-size:11px}
+
+    /* ── CARDS ── */
     .card{background:var(--card);border:1px solid var(--border);border-radius:16px;overflow:hidden}
-    .card-h{padding:12px 14px;border-bottom:1px solid var(--border);background:rgba(255,255,255,0.02);display:flex;justify-content:space-between;align-items:center;gap:10px}
-    .card-b{padding:12px 14px}
-    .badges{display:flex;flex-wrap:wrap;gap:8px}
-    .badge{padding:6px 10px;border-radius:999px;background:rgba(124,255,176,0.08);border:1px solid rgba(124,255,176,0.25);color:var(--accent);font-size:12px}
-    .badge.red{background:rgba(255,91,91,0.10);border-color:rgba(255,91,91,0.30);color:var(--red)}
-    .badge.orange{background:rgba(255,176,32,0.10);border-color:rgba(255,176,32,0.30);color:var(--orange)}
-    .badge.blue{background:rgba(87,163,255,0.10);border-color:rgba(87,163,255,0.30);color:var(--blue)}
-    .badge.gray{background:rgba(255,255,255,0.06);border-color:rgba(255,255,255,0.12);color:var(--muted)}
-    .kv{width:100%;border-collapse:collapse;font-size:12px}
-    .kv td{border-bottom:1px solid rgba(255,255,255,0.06);padding:8px 8px;vertical-align:top}
-    .kv td.k{color:var(--muted);width:240px}
-    .tbl{width:100%;border-collapse:collapse;font-size:12px;table-layout:fixed}
-    .tbl th,.tbl td{border-bottom:1px solid rgba(255,255,255,0.07);padding:8px 8px;vertical-align:top}
-    .tbl th{text-align:left;color:var(--muted);font-weight:600;background:rgba(255,255,255,0.02)}
-    .tbl td{word-break:break-word}
-    .pre{background:#08101a;border:1px solid var(--border);padding:10px;border-radius:12px;overflow:auto;color:#ffeb3b;max-height:420px}
-    .shot{width:100%;border-radius:12px;border:1px solid var(--border);margin-top:10px}
-    .controls{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
-    .search{flex:1;min-width:260px;background:rgba(255,255,255,0.03);border:1px solid var(--border);color:var(--txt);padding:10px 12px;border-radius:12px;outline:none}
-    .search::placeholder{color:rgba(152,167,184,0.75)}
-    .fbtn{cursor:pointer;border:1px solid var(--border);background:rgba(255,255,255,0.02);color:var(--muted);padding:8px 10px;border-radius:999px;font-size:12px}
-    .fbtn.active{border-color:rgba(124,255,176,0.35);color:var(--accent);background:rgba(124,255,176,0.08)}
-    footer{text-align:center;color:var(--muted);margin:16px 0 6px;font-size:12px}
+    .card-h{padding:13px 16px;border-bottom:1px solid var(--border);background:rgba(255,255,255,0.015);display:flex;justify-content:space-between;align-items:center;gap:10px;cursor:pointer;user-select:none}
+    .card-h h2{font-size:14px;font-weight:600}
+    .card-b{padding:14px 16px}
+    .card-full{grid-column:1/-1}
 
-    /* Gallery */
-    .gal-grid{display:grid;grid-template-columns:repeat(1,minmax(0,1fr));gap:12px}
-    @media (min-width: 720px){.gal-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}
-    @media (min-width: 1080px){.gal-grid{grid-template-columns:repeat(3,minmax(0,1fr))}}
-    @media (min-width: 1400px){.gal-grid{grid-template-columns:repeat(4,minmax(0,1fr))}}
-    .tile{display:block;text-decoration:none;border:1px solid var(--border);border-radius:14px;overflow:hidden;background:rgba(255,255,255,0.02);transition:transform .12s ease, border-color .12s ease}
-    .tile:hover{transform:translateY(-1px);border-color:rgba(124,255,176,0.28)}
-    .tile-top{display:flex;gap:8px;justify-content:space-between;align-items:center;padding:10px 10px 0}
-    .chip{display:inline-block;padding:4px 9px;border-radius:999px;border:1px solid rgba(255,255,255,0.10);background:rgba(0,0,0,0.18);color:var(--txt);font-size:12px}
-    .thumb{width:100%;height:190px;object-fit:cover;border-top:1px solid rgba(255,255,255,0.06);border-bottom:1px solid rgba(255,255,255,0.06)}
-    .tile-bot{padding:10px}
-    .t-url{font-size:12px;color:var(--txt);word-break:break-all}
-    .t-meta{margin-top:6px;font-size:11px;color:var(--muted);word-break:break-word}
-    .t-mini{margin-top:6px;font-size:11px;color:rgba(152,167,184,0.85);word-break:break-word}
+    /* ── GRID ── */
+    .grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+    @media(max-width:900px){.grid2{grid-template-columns:1fr}}
 
-    /* Collapsible cards */
-    details > summary { list-style: none; cursor: pointer; }
-    details > summary::-webkit-details-marker { display:none; }
+    /* ── BADGES ── */
+    .badges{display:flex;flex-wrap:wrap;gap:7px}
+    .badge{padding:5px 11px;border-radius:999px;font-size:12px;font-weight:500}
+    .badge-green{background:rgba(79,255,176,0.08);border:1px solid rgba(79,255,176,0.25);color:var(--accent)}
+    .badge-blue{background:rgba(63,160,255,0.10);border:1px solid rgba(63,160,255,0.30);color:var(--blue)}
+    .badge-red{background:rgba(255,77,109,0.10);border:1px solid rgba(255,77,109,0.30);color:var(--red)}
+    .badge-orange{background:rgba(255,170,0,0.10);border:1px solid rgba(255,170,0,0.30);color:var(--orange)}
+    .badge-gray{background:rgba(255,255,255,0.05);border:1px solid rgba(255,255,255,0.10);color:var(--muted)}
+    .badge-purple{background:rgba(157,78,221,0.10);border:1px solid rgba(157,78,221,0.30);color:var(--purple)}
+
+    /* ── TABLES ── */
+    .tbl-wrap{overflow-x:auto;border-radius:12px;border:1px solid var(--border)}
+    table.tbl{width:100%;border-collapse:collapse;font-size:12px}
+    table.tbl th{padding:10px 12px;text-align:left;color:var(--muted);font-weight:600;background:rgba(255,255,255,0.02);border-bottom:1px solid var(--border);white-space:nowrap}
+    table.tbl td{padding:9px 12px;border-bottom:1px solid rgba(255,255,255,0.04);vertical-align:top;word-break:break-word}
+    table.tbl tr:last-child td{border-bottom:none}
+    table.tbl tr:hover td{background:rgba(255,255,255,0.02)}
+
+    /* ── KV TABLE ── */
+    table.kv{width:100%;border-collapse:collapse;font-size:12px}
+    table.kv td{padding:8px 10px;border-bottom:1px solid rgba(255,255,255,0.04);vertical-align:top}
+    table.kv td.k{color:var(--muted);width:200px;white-space:nowrap;font-family:monospace}
+    table.kv tr:last-child td{border-bottom:none}
+
+    /* ── CONTROLS ── */
+    .controls{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+    .search{flex:1;min-width:240px;background:rgba(255,255,255,0.03);border:1px solid var(--border);color:var(--txt);padding:9px 14px;border-radius:12px;outline:none;font-size:13px;transition:border-color .15s}
+    .search:focus{border-color:rgba(79,255,176,0.35)}
+    .search::placeholder{color:rgba(125,143,163,0.6)}
+    .fbtn{cursor:pointer;border:1px solid var(--border);background:rgba(255,255,255,0.02);color:var(--muted);padding:7px 12px;border-radius:999px;font-size:12px;transition:all .15s;white-space:nowrap}
+    .fbtn.active,.fbtn:hover{border-color:rgba(79,255,176,0.35);color:var(--accent);background:rgba(79,255,176,0.06)}
+
+    /* ── ROUTE TYPE ── */
+    .rt-fe{background:rgba(63,160,255,0.08);border:1px solid rgba(63,160,255,0.25);color:var(--blue);padding:3px 9px;border-radius:999px;font-size:11px}
+    .rt-be{background:rgba(157,78,221,0.08);border:1px solid rgba(157,78,221,0.25);color:var(--purple);padding:3px 9px;border-radius:999px;font-size:11px}
+
+    /* ── FIREBASE ── */
+    .fb-card{background:linear-gradient(135deg,rgba(255,170,0,0.04),rgba(255,77,109,0.04));border:1px solid rgba(255,170,0,0.18);border-radius:16px;padding:18px}
+    .fb-title{color:var(--orange);font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.07em;margin-bottom:12px;display:flex;align-items:center;gap:8px}
+    .fb-key{font-family:monospace;font-size:11px;color:var(--yellow);background:rgba(255,209,102,0.08);padding:2px 8px;border-radius:5px}
+    .fb-val{font-family:monospace;font-size:11px;color:var(--txt);word-break:break-all}
+
+    /* ── SERVICE GRID ── */
+    .svc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px}
+    .svc-tile{background:rgba(255,255,255,0.03);border:1px solid var(--border);border-radius:12px;padding:12px 14px;transition:border-color .15s}
+    .svc-tile.active{border-color:rgba(79,255,176,0.30);background:rgba(79,255,176,0.04)}
+    .svc-tile.inactive{opacity:.35}
+    .svc-name{font-size:12px;font-weight:600;margin-top:4px;color:var(--txt)}
+    .svc-dot{width:8px;height:8px;border-radius:50%;display:inline-block}
+    .svc-dot.on{background:var(--accent)}
+    .svc-dot.off{background:var(--border)}
+
+    /* ── SCREENSHOT GALLERY ── */
+    .gal-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
+    .tile{display:block;text-decoration:none;border:1px solid var(--border);border-radius:14px;overflow:hidden;background:rgba(255,255,255,0.02);transition:transform .12s,border-color .12s}
+    .tile:hover{transform:translateY(-2px);border-color:rgba(79,255,176,0.30)}
+    .tile-top{display:flex;justify-content:space-between;align-items:center;padding:9px 10px 0}
+    .chip{padding:3px 9px;border-radius:999px;border:1px solid rgba(255,255,255,0.10);background:rgba(0,0,0,0.25);color:var(--txt);font-size:11px}
+    .thumb{width:100%;height:175px;object-fit:cover;border-top:1px solid rgba(255,255,255,0.05);display:block}
+    .tile-bot{padding:9px 10px}
+    .t-url{font-size:11px;color:var(--txt);word-break:break-all}
+    .t-meta{margin-top:4px;font-size:10px;color:var(--muted)}
+    .t-mini{font-size:10px;color:var(--muted);word-break:break-word;margin-top:3px}
+
+    /* ── MISC ── */
+    .muted{color:var(--muted);font-size:13px}
+    .sep{height:1px;background:var(--border);margin:18px 0}
+    .pre{background:#050810;border:1px solid var(--border);padding:12px;border-radius:10px;overflow:auto;color:#ffd166;font-family:monospace;font-size:11px;max-height:380px;white-space:pre-wrap;word-break:break-all}
+    details > summary{list-style:none;cursor:pointer}
+    details > summary::-webkit-details-marker{display:none}
+    footer{text-align:center;color:var(--muted);font-size:12px;padding:24px 0 12px;border-top:1px solid var(--border);margin-top:32px}
   </style>
 </head>
 <body>
-  <div class="wrap" id="app"></div>
+<div class="wrap">
 
 <script>
 const RESULTS = __RESULTS_JSON__;
+</script>
 
-function esc(s){ return String(s ?? '').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'","&#39;"); }
-function badge(text, cls=''){ return `<span class="badge ${cls}">${esc(text)}</span>`; }
-function pill(text){ return `<span class="pill">${esc(text)}</span>`; }
+<script>
+/* ─── helpers ─── */
+function esc(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
+function badge(t,cls='badge-gray'){return `<span class="badge ${cls}">${esc(t)}</span>`;}
+
+function statusBadge(code){
+  if(code==null)return badge('—');
+  const n=Number(code);
+  if(n>=200&&n<300)return badge(String(n),'badge-blue');
+  if(n===401||n===403)return badge(String(n),'badge-orange');
+  if(n>=300&&n<400)return badge(String(n),'badge-gray');
+  if(n>=400)return badge(String(n),'badge-red');
+  return badge(String(n),'badge-gray');
+}
+function accessBadge(s){
+  if(s==='con acceso')return badge('✓ acceso','badge-green');
+  if(s==='sin acceso')return badge('✗ bloqueado','badge-red');
+  return badge(s||'—');
+}
+function routeTypeBadge(t){
+  if(t==='backend')return '<span class="rt-be">API</span>';
+  return '<span class="rt-fe">UI</span>';
+}
 
 function kvTable(obj){
-  if(!obj || Object.keys(obj).length===0) return '';
-  const rows = Object.entries(obj).map(([k,v])=>`<tr><td class="k">${esc(k)}</td><td class="v">${esc(v)}</td></tr>`).join('');
+  if(!obj||!Object.keys(obj).length)return '<p class="muted">—</p>';
+  const rows=Object.entries(obj).map(([k,v])=>`<tr><td class="k">${esc(k)}</td><td>${esc(String(v))}</td></tr>`).join('');
   return `<table class="kv">${rows}</table>`;
 }
 
-function table(cols, rows){
-  if(!rows || rows.length===0) return '';
-  const head = cols.map(c=>`<th>${esc(c)}</th>`).join('');
-  const body = rows.map(r=>`<tr>${r.map(c=>`<td>${c}</td>`).join('')}</tr>`).join('');
-  return `<table class="tbl"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+function tbl(cols,rows,id=''){
+  if(!rows||!rows.length)return '<p class="muted" style="padding:8px 0">No hay datos.</p>';
+  const head=cols.map(c=>`<th>${esc(c)}</th>`).join('');
+  const body=rows.map(r=>`<tr>${r.map(c=>`<td>${c}</td>`).join('')}</tr>`).join('');
+  return `<div class="tbl-wrap"><table class="tbl"${id?` id="${id}"`:''}><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
 }
 
-function card(title, body, extraClass=""){
-  const cls = extraClass ? `card ${extraClass}` : "card";
-  return `<details class="${cls}" open>
-    <summary class="card-h"><h2>${esc(title)}</h2><div class="pill">toggle</div></summary>
-    <div class="card-b">${body}</div>
-  </details>`;
-}
-
-function accessBadge(state){
-  if(state === 'con acceso') return badge('con acceso', 'blue');
-  if(state === 'sin acceso') return badge('sin acceso', 'red');
-  return badge(state || '—', 'gray');
-}
-
-function statusBadge(code){
-  if(code == null) return badge('—','gray');
-  const n = Number(code);
-  if(n >= 200 && n < 300) return badge(String(n),'blue');
-  if(n === 401) return badge('401','orange');
-  if(n === 403) return badge('403','orange');
-  if(n >= 300 && n < 400) return badge(String(n),'gray');
-  if(n >= 400) return badge(String(n),'red');
-  return badge(String(n),'gray');
-}
-
-function wireTableSearch(inputId, wrapId, countId){
-  const input = document.getElementById(inputId);
-  const wrap = document.getElementById(wrapId);
-  const count = document.getElementById(countId);
-  if(!input || !wrap) return;
-
+function wireSearch(inputId,tableId,countId){
+  const inp=document.getElementById(inputId);
+  const tbl=document.getElementById(tableId);
+  const cnt=document.getElementById(countId);
+  if(!inp||!tbl)return;
   function apply(){
-    const q = (input.value || '').toLowerCase().trim();
-    const rows = wrap.querySelectorAll('tbody tr');
-    let shown = 0;
-    rows.forEach(tr=>{
-      const text = tr.innerText.toLowerCase();
-      const ok = !q || text.includes(q);
-      tr.style.display = ok ? '' : 'none';
-      if(ok) shown++;
+    const q=(inp.value||'').toLowerCase();
+    let n=0;
+    tbl.querySelectorAll('tbody tr').forEach(tr=>{
+      const ok=!q||tr.innerText.toLowerCase().includes(q);
+      tr.style.display=ok?'':'none';
+      if(ok)n++;
     });
-    if(count) count.textContent = String(shown);
+    if(cnt)cnt.textContent=String(n);
   }
-
-  input.addEventListener('input', apply);
+  inp.addEventListener('input',apply);
   apply();
 }
 
+/* ─── main render ─── */
 function build(){
-  const meta = RESULTS.meta || {};
-  const stats = RESULTS.stats || {};
-  const app = document.getElementById('app');
+  const meta=RESULTS.meta||{};
+  const stats=RESULTS.stats||{};
+  const stack=RESULTS.stack_summary||{};
+  const tp=RESULTS.third_party_services||{};
+  const fb=RESULTS.firebase||{};
+  const ep=RESULTS.endpoints||{};
+  const inv=RESULTS.inventory||{};
+  const ts=Number(meta.timestamp||0)*1000;
+  const tsStr=ts?new Date(ts).toLocaleString():'—';
 
-  const header = `
-    <div class="top">
-      <div style="flex:1;min-width:320px">
-        <h1>Darkmoon • Public Exposure Report</h1>
-        <p class="muted">${esc(meta.purpose||'')}</p>
-        <p class="muted"><b>Disclaimer:</b> ${esc(meta.disclaimer||'')}</p>
-        <div class="badges" style="margin-top:10px;">
-          ${(RESULTS.framework_hints||[]).map(x=>badge(x,'gray')).join('')}
-          ${(RESULTS.fingerprints||[]).slice(0,8).map(x=>badge(x,'gray')).join('')}
-        </div>
+  /* ── NAV ── */
+  document.querySelector('.wrap').innerHTML=`
+  <div class="nav">
+    <div class="nav-logo">Darkm<span>Lens</span></div>
+    <span class="nav-badge">v${esc(meta.tool||'DarkmLens')}</span>
+    <span class="nav-right">${tsStr}</span>
+  </div>
+
+  <!-- HERO -->
+  <div class="hero">
+    <div>
+      <div class="hero-title">Reporte de <span class="hl">Exposición Pública</span></div>
+      <div class="hero-url">🎯 ${esc(RESULTS.url||'')} ${RESULTS.final_url&&RESULTS.final_url!==RESULTS.url?`→ ${esc(RESULTS.final_url)}`:''}
       </div>
-      <div class="box">
-        ${pill('Target')}<div class="big">${esc(RESULTS.url||'')}</div>
-        <div style="height:10px"></div>
-        ${pill('Final URL')}<div class="big">${esc(RESULTS.final_url||'')}</div>
-        <div style="height:10px"></div>
-        ${pill('Timestamp')}<div class="big">${esc(meta.timestamp||'')}</div>
-        <div style="height:10px"></div>
-        ${pill('Auth headers')}<div class="big">${esc((RESULTS.server_headers && Object.keys(RESULTS.server_headers).length>0) ? 'YES' : '—')}</div>
+      <div class="hero-meta">
+        ${stack.app_type?`<span class="meta-pill">📦 Stack: <b>${esc(stack.app_type)}</b></span>`:''}
+        <span class="meta-pill">🕐 <b>${tsStr}</b></span>
+        <span class="meta-pill">⚠ ${esc(meta.disclaimer||'Uso autorizado únicamente.')}</span>
       </div>
-    </div>`;
+    </div>
+    <div class="hero-box">
+      <div style="font-size:11px;color:var(--muted);margin-bottom:6px">SERVIDOR</div>
+      ${kvTable(RESULTS.server_headers||{})}
+    </div>
+  </div>
 
-  const statsHtml = `
-    <div class="stats">
-      <div class="stat">${pill('Assets fetched')}<div class="big">${esc(stats.assets_fetched||0)}</div></div>
-      <div class="stat">${pill('Maps found')}<div class="big">${esc(stats.maps_found||0)}</div></div>
-      <div class="stat">${pill('Maps fetched')}<div class="big">${esc(stats.maps_fetched||0)}</div></div>
-      <div class="stat">${pill('Pages visited')}<div class="big">${esc(stats.pages_visited||0)} / ${esc((RESULTS?.crawl?.max_pages||0))}</div></div>
-      <div class="stat">${pill('AuthZ routes tested')}<div class="big">${esc(stats.authz_routes_tested||0)} / ${esc(RESULTS?.authz_audit?.max_routes||0)}</div></div>
-    </div>`;
+  <!-- APP STACK -->
+  ${buildStack(stack)}
 
-  let cards = '';
+  <!-- STATS -->
+  <div class="stats">
+    <div class="stat"><div class="stat-n">${esc(stats.assets_fetched||0)}</div><div class="stat-l">Assets JS/CSS</div></div>
+    <div class="stat"><div class="stat-n">${esc(stats.maps_found||0)}</div><div class="stat-l">Sourcemaps</div></div>
+    <div class="stat"><div class="stat-n">${esc(stats.pages_visited||0)}</div><div class="stat-l">Páginas visitadas</div></div>
+    <div class="stat"><div class="stat-n">${(inv.routes_full_urls||[]).filter(r=>r.route_type==='frontend').length}</div><div class="stat-l">Rutas UI frontend</div></div>
+    <div class="stat"><div class="stat-n">${(inv.routes_full_urls||[]).filter(r=>r.route_type==='backend').length + (ep.absolute||[]).length + (ep.relative||[]).length}</div><div class="stat-l">Endpoints API</div></div>
+    <div class="stat"><div class="stat-n">${(ep.requests_inferred||[]).length}</div><div class="stat-l">Requests inferidos</div></div>
+    <div class="stat"><div class="stat-n">${esc(stats.authz_routes_tested||0)}</div><div class="stat-l">AuthZ testeados</div></div>
+  </div>
 
-  if((RESULTS.technologies||[]).length){
-    cards += card('Tecnologías (Wappalyzer)',
-      `<div class="badges">${RESULTS.technologies.map(x=>badge(x)).join('')}</div>`,'full'
-    );
+  <!-- TECHNOLOGIES -->
+  ${buildTech()}
+
+  <!-- SCREENSHOT PRINCIPAL -->
+  ${RESULTS.screenshots&&RESULTS.screenshots.main?`
+  <div class="section">
+    <div class="section-h"><div class="section-title"><span class="ico ico-blue">📷</span>Captura Principal</div></div>
+    <img src="${esc(RESULTS.screenshots.main)}" style="width:100%;border-radius:14px;border:1px solid var(--border)" alt="screenshot"/>
+  </div>`:''}
+
+  <!-- FIREBASE -->
+  ${buildFirebase(fb)}
+
+  <!-- THIRD PARTY SERVICES -->
+  ${buildServices(tp)}
+
+  <!-- FRONTEND ROUTES -->
+  ${buildFrontendRoutes(inv)}
+
+  <!-- BACKEND ENDPOINTS -->
+  ${buildBackendEndpoints(ep,inv)}
+
+  <!-- REQUESTS INFERRED -->
+  ${buildRequests(ep)}
+
+  <!-- AUTHZ AUDIT -->
+  ${buildAuthz()}
+
+  <!-- CONFIGS EXPUESTOS -->
+  ${buildExposedConfigs()}
+
+  <!-- SCREENSHOT GALLERY -->
+  ${buildGallery()}
+
+  <!-- NOTES -->
+  ${buildNotes()}
+
+  <footer>
+    <b>DarkmLens</b> · Darkmoon Security Reporting · Uso autorizado únicamente
+  </footer>
+  `;
+
+  /* wire searches */
+  wireSearch('feSearch','feTable','feCount');
+  wireSearch('beSearch','beTable','beCount');
+  wireSearch('reqSearch','reqTable','reqCount');
+  wireSearch('authSearch','authTable','authCount');
+
+  /* authz filters */
+  setupAuthzFilters();
+
+  /* gallery filter */
+  setupGalleryFilter();
+}
+
+/* ─── STACK ─── */
+function buildStack(stack){
+  if(!stack||!stack.app_type)return '';
+  const fe=(stack.frontend_frameworks||[]).map(x=>`<span class="fw-badge fw-fe">⚡ ${esc(x)}</span>`).join('');
+  const be=(stack.backend_frameworks||[]).map(x=>`<span class="fw-badge fw-be">⚙ ${esc(x)}</span>`).join('');
+  const sv=(stack.services||[]).map(x=>`<span class="fw-badge fw-svc">☁ ${esc(x)}</span>`).join('');
+  return `
+  <div class="stack-card">
+    <div class="stack-title">🏗 Stack Detectado</div>
+    <div class="stack-type">${esc(stack.app_type)}</div>
+    <div class="stack-cols">
+      <div><div class="stack-col-label">Frontend</div>${fe||'<span style="color:var(--muted);font-size:12px">No identificado</span>'}</div>
+      <div><div class="stack-col-label">Backend</div>${be||'<span style="color:var(--muted);font-size:12px">No identificado</span>'}</div>
+      <div><div class="stack-col-label">Servicios</div>${sv||'<span style="color:var(--muted);font-size:12px">Ninguno detectado</span>'}</div>
+    </div>
+  </div>`;
+}
+
+/* ─── TECH ─── */
+function buildTech(){
+  const fp=RESULTS.fingerprints||[];
+  const bk=RESULTS.backend_hints||[];
+  const fw=RESULTS.framework_hints||[];
+  const tc=RESULTS.technologies||[];
+  if(!fp.length&&!bk.length&&!fw.length&&!tc.length)return '';
+  return `
+  <div class="section">
+    <div class="section-h"><div class="section-title"><span class="ico ico-accent">🔍</span>Tecnologías y Fingerprints</div></div>
+    <div class="grid2">
+      ${fw.length||tc.length?`<div class="card"><div class="card-h"><h2>Frameworks / Wappalyzer</h2></div><div class="card-b">
+        <div class="badges">${[...fw,...tc].map(x=>badge(x,'badge-blue')).join('')}</div></div></div>`:''}
+      ${bk.length?`<div class="card"><div class="card-h"><h2>Backend Hints</h2></div><div class="card-b">
+        <div class="badges">${bk.map(x=>badge(x,'badge-purple')).join('')}</div></div></div>`:''}
+      ${fp.length?`<div class="card"><div class="card-h"><h2>Fingerprints</h2></div><div class="card-b">
+        <div class="badges">${fp.map(x=>badge(x,'badge-gray')).join('')}</div></div></div>`:''}
+    </div>
+  </div>`;
+}
+
+/* ─── FIREBASE ─── */
+function buildFirebase(fb){
+  if(!fb||!fb.detected)return '';
+  const parsed=(fb.configs_parsed||[]);
+  const cols=(fb.collections_probable||[]);
+  const rtdb=(fb.rtdb||[]);
+  const frest=(fb.firestore_rest||[]);
+
+  let configHtml='';
+  if(parsed.length){
+    const first=parsed[0].fields||{};
+    const rows=Object.entries(first).map(([k,v])=>`<tr><td class="k"><span class="fb-key">${esc(k)}</span></td><td><span class="fb-val">${esc(v)}</span></td></tr>`).join('');
+    configHtml=`<div class="sep"></div><div style="font-size:11px;color:var(--muted);margin-bottom:8px;font-weight:600;text-transform:uppercase">Configuración Firebase</div><table class="kv">${rows}</table>
+    ${parsed.length>1?`<p class="muted" style="margin-top:8px">+${parsed.length-1} config(s) adicional(es).</p>`:''}`;
+  }else if(fb.configs&&fb.configs.length){
+    configHtml=`<div class="sep"></div><div class="pre">${esc((fb.configs[0].blob||'').slice(0,800))}</div>`;
   }
 
-  if((RESULTS.fingerprints||[]).length || (RESULTS.server_headers && Object.keys(RESULTS.server_headers).length)){
-    cards += card('Fingerprints & Headers',
-      `<div class="badges">${(RESULTS.fingerprints||[]).map(x=>badge(x,'gray')).join('')}</div>
-       <h3>Headers (selección)</h3>${kvTable(RESULTS.server_headers||{})}`,'full'
-    );
-  }
-
-  if((RESULTS.backend_hints||[]).length){
-    cards += card('Backend hints (heurístico)',
-      `<ul>${RESULTS.backend_hints.map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`,'full'
-    );
-  }
-
-  // Screenshot principal (full row)
-  if(RESULTS.screenshots && RESULTS.screenshots.main){
-    cards += `<details class="card full" open>
-      <summary class="card-h"><h2>Screenshot (principal)</h2><div class="pill">toggle</div></summary>
-      <div class="card-b">
-        <p class="muted">Captura automática (si Playwright está instalado).</p>
-        <img class="shot" src="${esc(RESULTS.screenshots.main)}" alt="screenshot"/>
-      </div>
-    </details>`;
-  }
-
-  // NEW: Backend endpoints summary (compact)
-  const inferred = (RESULTS.endpoints && RESULTS.endpoints.requests_inferred) ? RESULTS.endpoints.requests_inferred : [];
-  const abs = (RESULTS.endpoints && RESULTS.endpoints.absolute) ? RESULTS.endpoints.absolute : [];
-  const rel = (RESULTS.endpoints && RESULTS.endpoints.relative) ? RESULTS.endpoints.relative : [];
-  const gql = (RESULTS.endpoints && RESULTS.endpoints.graphql) ? RESULTS.endpoints.graphql : [];
-  const ws = (RESULTS.endpoints && RESULTS.endpoints.websocket) ? RESULTS.endpoints.websocket : [];
-  const bases = (RESULTS.endpoints && RESULTS.endpoints.base_urls) ? RESULTS.endpoints.base_urls : [];
-
-  const backendRows = [];
-  inferred.slice(0,220).forEach(x=>{
-    backendRows.push([
-      `<div class="badges">${badge((x.method||'UNKNOWN').toUpperCase(),'blue')}</div>`,
-      `<a href="${esc(x.full_url||'')}" target="_blank">${esc(x.full_url||'')}</a>`,
-      `<div class="badges">${(x.params||[]).length ? (x.params||[]).map(p=>badge(p,'gray')).join('') : badge('—','gray')}</div>`,
-      `<div class="badges">${(x.body_keys||[]).length ? (x.body_keys||[]).map(p=>badge(p,'gray')).join('') : badge('—','gray')}</div>`,
-      `<div class="t-mini">${esc(x.evidence||'')}</div>`,
-      `<div class="t-mini">${esc(x.found_in||'')} : ${esc(x.line||'')}</div>`
+  let colsHtml='';
+  if(cols.length){
+    const rows2=cols.map(c=>[
+      `<b>${esc(c.name||'')}</b>`,
+      badge(c.evidence||'collection()','badge-orange'),
+      `<span class="t-mini">${esc(c.found_in||'')}</span>`
     ]);
-  });
-
-  if(backendRows.length || abs.length || rel.length || gql.length || ws.length || bases.length){
-    const extraBadges = `
-      <div class="badges">
-        ${badge(`requests_inferred: ${inferred.length}`,'gray')}
-        ${badge(`absolute: ${abs.length}`,'gray')}
-        ${badge(`relative: ${rel.length}`,'gray')}
-        ${badge(`graphql: ${gql.length}`,'gray')}
-        ${badge(`websocket: ${ws.length}`,'gray')}
-        ${badge(`base_urls: ${bases.length}`,'gray')}
-      </div>
-    `;
-
-    cards += card('Backend endpoints encontrados (resumen)',
-      `
-      ${extraBadges}
-      <div class="controls" style="margin-top:10px">
-        <input id="beSearch" class="search" placeholder="Buscar en endpoints (método/url/params/body)...">
-      </div>
-      <p class="muted">Mostrando <span id="beCount">${Math.min(backendRows.length,220)}</span> de ${backendRows.length} inferidos (fetch/axios/etc).</p>
-      <div id="beTable">${table(['Method','Full URL','Query params','Body keys','Evidence','Found in'], backendRows)}</div>
-      `,'full'
-    );
+    colsHtml=`<div class="sep"></div><div style="font-size:11px;color:var(--muted);margin-bottom:8px;font-weight:600;text-transform:uppercase">Colecciones / Paths detectados</div>
+    ${tbl(['Colección','Evidencia','Encontrado en'],rows2)}`;
   }
 
-  // AuthZ audit table
-  const authItems = (RESULTS.authz_audit && RESULTS.authz_audit.items) ? RESULTS.authz_audit.items : [];
-  if(authItems.length){
-    const controls = `
-      <div class="controls">
-        <input id="authSearch" class="search" placeholder="Buscar por URL / ruta...">
-        <button class="fbtn active" data-filter="all">Todas</button>
-        <button class="fbtn" data-filter="access">Con acceso</button>
-        <button class="fbtn" data-filter="noaccess">Sin acceso</button>
-        <button class="fbtn" data-filter="401">401</button>
-        <button class="fbtn" data-filter="403">403</button>
-        <button class="fbtn" data-filter="404">404</button>
-      </div>
-      <p class="muted" style="margin-top:8px">Mostrando <span id="authCount">${authItems.length}</span> rutas.</p>
-    `;
+  return `
+  <div class="section">
+    <div class="section-h">
+      <div class="section-title"><span class="ico ico-orange">🔥</span>Firebase</div>
+      <span class="count-badge">${cols.length} colecciones · ${parsed.length} configs</span>
+    </div>
+    <div class="fb-card">
+      <div class="fb-title">🔥 Firebase detectado</div>
+      ${configHtml}
+      ${colsHtml}
+      ${rtdb.length?`<div class="sep"></div><div style="font-size:11px;color:var(--muted);margin-bottom:8px;font-weight:600;text-transform:uppercase">Realtime DB</div><ul style="font-size:12px">${rtdb.slice(0,10).map(r=>`<li><a href="${esc(r.url||'')}" target="_blank">${esc(r.url||'')}</a></li>`).join('')}</ul>`:''}
+      ${frest.length?`<div class="sep"></div><div style="font-size:11px;color:var(--muted);margin-bottom:8px;font-weight:600;text-transform:uppercase">Firestore REST</div><ul style="font-size:12px">${frest.slice(0,10).map(r=>`<li><a href="${esc(r.url||'')}" target="_blank">${esc(r.url||'')}</a></li>`).join('')}</ul>`:''}
+    </div>
+  </div>`;
+}
 
-    const rows = authItems.map(it => {
-      const url = it.url || '';
-      const shot = it.screenshot ? `<a href="${esc(it.screenshot)}" target="_blank">ver</a>` : '';
-      const params = (it.params||[]).length ? (it.params||[]).map(x=>badge(x,'gray')).join('') : badge('—','gray');
-      const bkeys = (it.body_keys||[]).length ? (it.body_keys||[]).map(x=>badge(x,'gray')).join('') : badge('—','gray');
-      const methods = (it.methods||[]).length ? (it.methods||[]).map(x=>badge(x,'blue')).join('') : badge('GET','blue');
-      const ai = it.ai_summary ? `<div class="t-mini">${esc(it.ai_summary)}</div>` : '';
+/* ─── THIRD-PARTY SERVICES ─── */
+function buildServices(tp){
+  const services=[
+    {key:'supabase',label:'Supabase',ico:'🗄'},
+    {key:'auth0',label:'Auth0',ico:'🔐'},
+    {key:'clerk',label:'Clerk',ico:'🔑'},
+    {key:'stripe',label:'Stripe',ico:'💳'},
+    {key:'mixpanel',label:'Mixpanel',ico:'📊'},
+    {key:'intercom',label:'Intercom',ico:'💬'},
+    {key:'pusher',label:'Pusher',ico:'📡'},
+    {key:'algolia',label:'Algolia',ico:'🔎'},
+    {key:'google_maps',label:'Google Maps',ico:'🗺'},
+    {key:'mapbox',label:'Mapbox',ico:'📍'},
+    {key:'twilio',label:'Twilio',ico:'📞'},
+    {key:'onesignal',label:'OneSignal',ico:'🔔'},
+    {key:'recaptcha',label:'reCAPTCHA',ico:'🤖'},
+    {key:'hotjar',label:'Hotjar',ico:'🌡'},
+    {key:'datadog',label:'DataDog',ico:'🐕'},
+    {key:'launchdarkly',label:'LaunchDarkly',ico:'🚩'},
+    {key:'amplitude',label:'Amplitude',ico:'📈'},
+    {key:'posthog',label:'PostHog',ico:'🦔'},
+  ];
+  const detected=services.filter(s=>(tp[s.key]||{}).detected);
+  const notDetected=services.filter(s=>!(tp[s.key]||{}).detected);
 
-      return [
-        `<div>${statusBadge(it.status)} ${accessBadge(it.state)}</div>
-         <div class="t-mini">${esc(it.reason||'')}</div>`,
-        `<div><a href="${esc(url)}" target="_blank">${esc(url)}</a></div>${ai}`,
-        `<div class="badges">${methods}</div>`,
-        `<div class="badges">${params}</div>`,
-        `<div class="badges">${bkeys}</div>`,
-        `${shot}`,
-        `${it.saved_body ? `<code>${esc(it.saved_body)}</code>` : ''}`
-      ];
-    });
-
-    cards += card('AuthZ Audit (estado por ruta)',
-      `${controls}
-       <div id="authTable">${table(
-        ['Estado', 'URL', 'Métodos', 'Query params', 'Body keys', 'Screenshot', 'Saved body'],
-        rows
-       )}</div>`,'full'
-    );
+  let detailHtml='';
+  const sup=tp.supabase||{};
+  if(sup.detected){
+    detailHtml+=`<div class="sep"></div><b>Supabase</b><br>
+    ${sup.urls.length?`<div class="muted" style="margin-top:4px">URL: ${sup.urls.map(u=>`<a href="${esc(u)}" target="_blank">${esc(u)}</a>`).join(', ')}</div>`:''}
+    ${sup.tables.length?`<div class="muted" style="margin-top:4px">Tablas detectadas: ${sup.tables.map(t=>badge(t,'badge-orange')).join('')}</div>`:''}`;
+  }
+  const auth=tp.auth0||{};
+  if(auth.detected&&auth.domains.length){
+    detailHtml+=`<div class="sep"></div><b>Auth0 domains:</b> ${auth.domains.map(d=>badge(d,'badge-purple')).join('')}`;
+  }
+  const stripe=tp.stripe||{};
+  if(stripe.detected&&stripe.public_keys.length){
+    detailHtml+=`<div class="sep"></div><b>Stripe public keys:</b> ${stripe.public_keys.map(k=>`<code>${esc(k)}</code>`).join(' ')}`;
+  }
+  const mapbox=tp.mapbox||{};
+  if(mapbox.detected&&mapbox.tokens.length){
+    detailHtml+=`<div class="sep"></div><b>Mapbox tokens:</b> ${mapbox.tokens.map(t=>`<code>${esc(t.slice(0,32))}…</code>`).join(' ')}`;
   }
 
-  // Routes discovered (with search)
-  const routes = (RESULTS.inventory && RESULTS.inventory.routes_full_urls) ? RESULTS.inventory.routes_full_urls : [];
-  if(routes.length){
-    const rows = routes.slice(0,180).map(r => [
-      `<code>${esc(r.path||'')}</code>`,
+  return `
+  <div class="section">
+    <div class="section-h">
+      <div class="section-title"><span class="ico ico-green">☁</span>Servicios de Terceros</div>
+      <span class="count-badge">${detected.length} detectados</span>
+    </div>
+    <div class="svc-grid">
+      ${detected.map(s=>`<div class="svc-tile active">${s.ico} <span class="svc-dot on"></span><div class="svc-name">${esc(s.label)}</div></div>`).join('')}
+      ${notDetected.map(s=>`<div class="svc-tile inactive">${s.ico} <span class="svc-dot off"></span><div class="svc-name">${esc(s.label)}</div></div>`).join('')}
+    </div>
+    ${detailHtml?`<div class="card" style="margin-top:14px"><div class="card-b">${detailHtml}</div></div>`:''}
+  </div>`;
+}
+
+/* ─── FRONTEND ROUTES ─── */
+function buildFrontendRoutes(inv){
+  const routes=(inv.routes_full_urls||[]).filter(r=>r.route_type==='frontend');
+  const n=routes.length;
+  if(!n)return '';
+  const rows=routes.slice(0,300).map(r=>[
+    `<code>${esc(r.path||'')}</code>`,
+    `<a href="${esc(r.full_url||'')}" target="_blank">${esc(r.full_url||'')}</a>`,
+    `<span class="t-mini">${esc(r.found_in||'')}</span>`,
+    r.line!=null?`<code>${esc(r.line)}</code>`:'—'
+  ]);
+  return `
+  <div class="section">
+    <div class="section-h">
+      <div class="section-title"><span class="ico ico-blue">📄</span>Rutas Frontend (UI)</div>
+      <span class="count-badge">Mostrando <b id="feCount">${Math.min(n,300)}</b> de ${n}</span>
+    </div>
+    <div class="controls">
+      <input id="feSearch" class="search" placeholder="Buscar ruta frontend..."/>
+    </div>
+    ${tbl(['Path','URL completa','Encontrado en','Línea'],rows,'feTable')}
+  </div>`;
+}
+
+/* ─── BACKEND ENDPOINTS ─── */
+function buildBackendEndpoints(ep,inv){
+  const beRoutes=(inv.routes_full_urls||[]).filter(r=>r.route_type==='backend');
+  const abs=ep.absolute||[];
+  const rel=ep.relative||[];
+  const gql=ep.graphql||[];
+  const ws=ep.websocket||[];
+  const bases=ep.base_urls||[];
+
+  const rows=[];
+  beRoutes.slice(0,100).forEach(r=>{
+    rows.push([routeTypeBadge('backend'),`<code>${esc(r.path||'')}</code>`,
       `<a href="${esc(r.full_url||'')}" target="_blank">${esc(r.full_url||'')}</a>`,
-      `<div class="t-mini">${esc(r.found_in||'')}</div>`,
-      `<code>${esc(r.line ?? '')}</code>`
-    ]);
-    cards += card('URLs/Rutas detectadas (posibles páginas)',
-      `
-      <div class="controls">
-        <input id="routesSearch" class="search" placeholder="Buscar en rutas/URLs...">
-      </div>
-      <p class="muted">Mostrando <span id="routesCount">${Math.min(routes.length,180)}</span> de ${routes.length}.</p>
-      <div id="routesTable">${table(['Path','Full URL','Found in','Line'], rows)}</div>
-      `,'full'
-    );
-  }
-
-  // Requests inferred (with search)
-  const reqs = (RESULTS.endpoints && RESULTS.endpoints.requests_inferred) ? RESULTS.endpoints.requests_inferred : [];
-  if(reqs.length){
-    const rows = reqs.slice(0,200).map(x => [
-      '',
-      `<div class="badges">${badge((x.method||'UNKNOWN').toUpperCase(),'blue')}</div>`,
+      badge('JS route','badge-gray'),`<span class="t-mini">${esc(r.found_in||'')}</span>`]);
+  });
+  abs.slice(0,80).forEach(x=>{
+    const ps=(x.params||[]).map(p=>badge(p,'badge-gray')).join('');
+    rows.push([routeTypeBadge('backend'),'—',
+      `<a href="${esc(x.url||'')}" target="_blank">${esc(x.url||'')}</a>`,
+      ps||badge('—','badge-gray'),`<span class="t-mini">${esc(x.found_in||'')}</span>`]);
+  });
+  rel.slice(0,80).forEach(x=>{
+    rows.push([routeTypeBadge('backend'),`<code>${esc(x.path||'')}</code>`,
       `<a href="${esc(x.full_url||'')}" target="_blank">${esc(x.full_url||'')}</a>`,
-      `<div class="badges">${(x.params||[]).length ? (x.params||[]).map(p=>badge(p,'gray')).join('') : badge('—','gray')}</div>`,
-      `<div class="badges">${(x.body_keys||[]).length ? (x.body_keys||[]).map(p=>badge(p,'gray')).join('') : badge('—','gray')}</div>`,
-      `<div class="t-mini">${esc(x.evidence||'')}</div>`,
-      `<div class="t-mini">${esc(x.found_in||'')} : ${esc(x.line||'')}</div>`
-    ]);
-    cards += card('Requests inferidos (método + endpoint + hints)',
-      `
-      <div class="controls">
-        <input id="reqSearch" class="search" placeholder="Buscar en requests/endpoints...">
-      </div>
-      <p class="muted">Mostrando <span id="reqCount">${Math.min(reqs.length,200)}</span> de ${reqs.length}.</p>
-      <div id="reqTable">${table(['', 'Method','Full URL','Params','Body keys','Evidence','Found in'], rows)}</div>
-      `,'full'
-    );
-  }
+      badge('relative','badge-gray'),`<span class="t-mini">${esc(x.found_in||'')}</span>`]);
+  });
 
-  // Gallery (screenshots routes)
-  const shots = (RESULTS.screenshots && RESULTS.screenshots.routes) ? RESULTS.screenshots.routes : [];
-  if(shots.length){
-    const tiles = shots.map(it=>{
-      const url = it.url || '';
-      const path = it.path || '';
-      const kind = it.kind || 'route';
-      return `
-        <a class="tile" href="${esc(path)}" target="_blank" rel="noreferrer" data-url="${esc(url)}" data-kind="${esc(kind)}">
-          <div class="tile-top">
-            <span class="chip">${esc(kind)}</span>
-          </div>
-          <img class="thumb" src="${esc(path)}" alt="shot"/>
-          <div class="tile-bot">
-            <div class="t-url">${esc(url)}</div>
-            <div class="t-meta">${esc(path)}</div>
-          </div>
-        </a>`;
-    }).join('');
+  let extras='';
+  if(gql.length) extras+=`<div style="margin-top:12px"><b>GraphQL endpoints:</b> ${gql.slice(0,5).map(x=>badge(x.url_or_path||'','badge-purple')).join('')}${gql.length>5?` +${gql.length-5}`:''}`;
+  if(ws.length) extras+=`<div style="margin-top:8px"><b>WebSocket URLs:</b> ${ws.slice(0,5).map(x=>`<code>${esc(x.url||'')}</code>`).join(' ')}${ws.length>5?` +${ws.length-5}`:''}</div>`;
+  if(bases.length) extras+=`<div style="margin-top:8px"><b>Base URLs detectadas:</b> ${bases.slice(0,5).map(x=>badge(x.value||'','badge-blue')).join('')}</div>`;
 
-    cards += card('Galería de screenshots (rutas)',
-      `<div class="controls">
-        <input id="galSearch" class="search" placeholder="Filtrar por URL...">
-      </div>
-      <p class="muted">Mostrando <span id="galCount">${shots.length}</span> items.</p>
-      <div class="gal-grid" id="galGrid">${tiles}</div>`,'full'
-    );
-  }
+  const total=beRoutes.length+abs.length+rel.length;
+  if(!total&&!gql.length&&!ws.length&&!bases.length)return '';
+  return `
+  <div class="section">
+    <div class="section-h">
+      <div class="section-title"><span class="ico ico-purple">⚙</span>Endpoints Backend / API</div>
+      <span class="count-badge">~${total} rutas · ${gql.length} GraphQL · ${ws.length} WS</span>
+    </div>
+    <div class="controls">
+      <input id="beSearch" class="search" placeholder="Buscar endpoint API..."/>
+    </div>
+    ${rows.length?tbl(['Tipo','Path','URL','Params/Tags','Encontrado en'],rows,'beTable'):''}
+    ${extras}
+  </div>`;
+}
 
-  // Notes
-  const notes = RESULTS.notes || [];
-  if(notes.length){
-    cards += card('Notas', `<ul>${notes.slice(0,120).map(x=>`<li>${esc(x)}</li>`).join('')}</ul>`);
-  }
+/* ─── REQUESTS INFERRED ─── */
+function buildRequests(ep){
+  const reqs=ep.requests_inferred||[];
+  if(!reqs.length)return '';
+  const rows=reqs.slice(0,250).map(x=>[
+    badge((x.method||'?').toUpperCase(), x.method==='GET'?'badge-blue':x.method==='POST'?'badge-purple':x.method==='DELETE'?'badge-red':'badge-orange'),
+    `<a href="${esc(x.full_url||'')}" target="_blank">${esc(x.full_url||x.url_or_path||'')}</a>`,
+    (x.params||[]).length?(x.params||[]).map(p=>badge(p,'badge-gray')).join(''):badge('—','badge-gray'),
+    (x.body_keys||[]).length?(x.body_keys||[]).map(p=>badge(p,'badge-gray')).join(''):badge('—','badge-gray'),
+    `<span class="t-mini">${esc(x.evidence||'')}</span>`,
+    `<span class="t-mini">${esc(x.found_in||'')}${x.line?':'+x.line:''}</span>`
+  ]);
+  return `
+  <div class="section">
+    <div class="section-h">
+      <div class="section-title"><span class="ico ico-accent">📡</span>Requests Inferidos (fetch/axios)</div>
+      <span class="count-badge">Mostrando <b id="reqCount">${Math.min(reqs.length,250)}</b> de ${reqs.length}</span>
+    </div>
+    <div class="controls">
+      <input id="reqSearch" class="search" placeholder="Buscar por método, URL, params, body..."/>
+    </div>
+    ${tbl(['Método','URL','Query params','Body keys','Evidencia','Encontrado en'],rows,'reqTable')}
+  </div>`;
+}
 
-  const filesCard = card('Archivos generados',
-    `<p class="muted">Revisa el JSON para detalle completo.</p>
-     <div class="badges">
-       ${badge('results.json')} ${badge('index.html')} ${badge('report.template.html')}
-       ${badge('routes/*.txt')} ${badge('screens/*.png')}
-     </div>`
-  );
+/* ─── AUTHZ AUDIT ─── */
+function buildAuthz(){
+  const items=(RESULTS.authz_audit&&RESULTS.authz_audit.items)||[];
+  if(!items.length)return '';
+  const rows=items.map(it=>{
+    const params=(it.params||[]).map(p=>badge(p,'badge-gray')).join('')||badge('—','badge-gray');
+    const bkeys=(it.body_keys||[]).map(p=>badge(p,'badge-gray')).join('')||badge('—','badge-gray');
+    const methods=(it.methods||['GET']).map(m=>badge(m,'badge-blue')).join('');
+    return [
+      `${statusBadge(it.status)} ${accessBadge(it.state)}<div class="t-mini">${esc(it.reason||'')}</div>`,
+      `<a href="${esc(it.url||'')}" target="_blank">${esc(it.url||'')}</a>${it.ai_summary?`<div class="t-mini">${esc(it.ai_summary)}</div>`:''}`,
+      methods,params,bkeys,
+      it.screenshot?`<a href="${esc(it.screenshot)}" target="_blank">ver</a>`:'—',
+    ];
+  });
+  return `
+  <div class="section">
+    <div class="section-h">
+      <div class="section-title"><span class="ico ico-red">🔐</span>AuthZ Audit</div>
+      <span class="count-badge">Mostrando <b id="authCount">${items.length}</b> rutas</span>
+    </div>
+    <div class="controls">
+      <input id="authSearch" class="search" placeholder="Buscar URL, estado..."/>
+      <button class="fbtn active" data-af="all">Todas</button>
+      <button class="fbtn" data-af="access">Con acceso</button>
+      <button class="fbtn" data-af="noaccess">Sin acceso</button>
+      <button class="fbtn" data-af="401">401</button>
+      <button class="fbtn" data-af="403">403</button>
+      <button class="fbtn" data-af="404">404</button>
+    </div>
+    ${tbl(['Estado','URL','Métodos','Query params','Body keys','Screenshot'],rows,'authTable')}
+  </div>`;
+}
 
-  app.innerHTML = header + statsHtml + `<div class="grid">${cards}${filesCard}</div>` + `<footer>Darkmoon • Security Reporting</footer>`;
+/* ─── EXPOSED CONFIGS ─── */
+function buildExposedConfigs(){
+  const cfg=RESULTS.exposed_configs||{};
+  const sentry=cfg.sentry||[];
+  const ga=cfg.google_analytics||[];
+  const seg=cfg.segment||[];
+  const cog=cfg.aws_amplify_cognito||[];
+  const app=cfg.aws_appsync_amplify||[];
+  const other=cfg.other||[];
+  const total=sentry.length+ga.length+seg.length+cog.length+app.length+other.length;
+  if(!total)return '';
+  let html='';
+  if(sentry.length) html+=`<div style="margin-bottom:10px"><b>Sentry DSN:</b> ${sentry.map(x=>`<code>${esc(x.dsn||'')}</code>`).join(' ')}</div>`;
+  if(ga.length) html+=`<div style="margin-bottom:10px"><b>Google Analytics:</b> ${ga.map(x=>badge(x.id||'','badge-blue')).join('')}</div>`;
+  if(seg.length) html+=`<div style="margin-bottom:10px"><b>Segment keys:</b> ${seg.map(x=>`<code>${esc(x.key||'')}</code>`).join(' ')}</div>`;
+  if(cog.length) html+=`<div style="margin-bottom:10px"><b>AWS Cognito hits:</b> ${cog.slice(0,6).map(x=>badge(x.hit||'','badge-orange')).join('')}</div>`;
+  if(app.length) html+=`<div style="margin-bottom:10px"><b>AWS AppSync hits:</b> ${app.slice(0,6).map(x=>badge(x.hit||'','badge-orange')).join('')}</div>`;
+  if(other.length&&other[0].sourcemap) html+=`<div><b>Sourcemaps encontrados:</b> ${other.map(o=>o.sourcemap?`<code>${esc(o.sourcemap.map_url||'')}</code>`:'' ).join(' ')}</div>`;
+  return `
+  <div class="section">
+    <div class="section-h"><div class="section-title"><span class="ico ico-orange">⚠</span>Configs Expuestas</div></div>
+    <div class="card"><div class="card-b">${html}</div></div>
+  </div>`;
+}
 
-  // AuthZ filters
-  const authSearch = document.getElementById('authSearch');
-  const authCount = document.getElementById('authCount');
-  const authTable = document.getElementById('authTable');
-  let authActive = 'all';
+/* ─── GALLERY ─── */
+function buildGallery(){
+  const shots=(RESULTS.screenshots&&RESULTS.screenshots.routes)||[];
+  if(!shots.length)return '';
+  const tiles=shots.map(it=>`
+    <a class="tile" href="${esc(it.path||'')}" target="_blank" data-url="${esc(it.url||'')}">
+      <div class="tile-top"><span class="chip">${esc(it.kind||'route')}</span></div>
+      <img class="thumb" src="${esc(it.path||'')}" alt=""/>
+      <div class="tile-bot"><div class="t-url">${esc(it.url||'')}</div></div>
+    </a>`).join('');
+  return `
+  <div class="section">
+    <div class="section-h">
+      <div class="section-title"><span class="ico ico-blue">🖼</span>Galería Screenshots</div>
+      <span class="count-badge" id="galCount">${shots.length} capturas</span>
+    </div>
+    <div class="controls"><input id="galSearch" class="search" placeholder="Filtrar por URL..."/></div>
+    <div class="gal-grid" id="galGrid">${tiles}</div>
+  </div>`;
+}
 
-  function authApply(){
-    if(!authTable) return;
-    const q = (authSearch && authSearch.value ? authSearch.value : '').toLowerCase();
-    const rows = authTable.querySelectorAll('tbody tr');
-    let shown = 0;
-    rows.forEach(tr=>{
-      const text = tr.innerText.toLowerCase();
-      const hasAccess = text.includes('con acceso');
-      const hasNo = text.includes('sin acceso');
-      const has401 = text.includes('401');
-      const has403 = text.includes('403');
-      const has404 = text.includes('404');
+/* ─── NOTES ─── */
+function buildNotes(){
+  const notes=RESULTS.notes||[];
+  if(!notes.length)return '';
+  return `
+  <div class="section">
+    <div class="section-h"><div class="section-title"><span class="ico ico-accent">📝</span>Notas del Escaneo</div></div>
+    <div class="card"><div class="card-b"><ul style="font-size:12px;padding-left:18px">${notes.slice(0,120).map(n=>`<li>${esc(n)}</li>`).join('')}</ul></div></div>
+  </div>`;
+}
 
-      const okFilter =
-        authActive === 'all' ||
-        (authActive === 'access' && hasAccess) ||
-        (authActive === 'noaccess' && hasNo) ||
-        (authActive === '401' && has401) ||
-        (authActive === '403' && has403) ||
-        (authActive === '404' && has404);
-
-      const okSearch = !q || text.includes(q);
-      const ok = okFilter && okSearch;
-      tr.style.display = ok ? '' : 'none';
-      if(ok) shown++;
+/* ─── AUTHZ FILTER LOGIC ─── */
+function setupAuthzFilters(){
+  const authTable=document.getElementById('authTable');
+  const authSearch=document.getElementById('authSearch');
+  const authCount=document.getElementById('authCount');
+  let active='all';
+  function apply(){
+    if(!authTable)return;
+    const q=(authSearch?authSearch.value:'').toLowerCase();
+    let n=0;
+    authTable.querySelectorAll('tbody tr').forEach(tr=>{
+      const txt=tr.innerText.toLowerCase();
+      const okF=active==='all'||(active==='access'&&txt.includes('acceso')&&!txt.includes('bloqueado'))||(active==='noaccess'&&txt.includes('bloqueado'))||(active==='401'&&txt.includes('401'))||(active==='403'&&txt.includes('403'))||(active==='404'&&txt.includes('404'));
+      const okS=!q||txt.includes(q);
+      tr.style.display=(okF&&okS)?'':'none';
+      if(okF&&okS)n++;
     });
-    if(authCount) authCount.textContent = String(shown);
+    if(authCount)authCount.textContent=String(n);
   }
-
-  document.querySelectorAll('.fbtn').forEach(b=>{
-    b.addEventListener('click', ()=>{
-      document.querySelectorAll('.fbtn').forEach(x=>x.classList.remove('active'));
+  document.querySelectorAll('[data-af]').forEach(b=>{
+    b.addEventListener('click',()=>{
+      document.querySelectorAll('[data-af]').forEach(x=>x.classList.remove('active'));
       b.classList.add('active');
-      authActive = b.getAttribute('data-filter') || 'all';
-      authApply();
+      active=b.getAttribute('data-af');
+      apply();
     });
   });
-  if(authSearch) authSearch.addEventListener('input', authApply);
-  authApply();
+  if(authSearch)authSearch.addEventListener('input',apply);
+  apply();
+}
 
-  // Gallery filter
-  const galGrid = document.getElementById('galGrid');
-  const galSearch = document.getElementById('galSearch');
-  const galCount = document.getElementById('galCount');
-
-  function galApply(){
-    if(!galGrid) return;
-    const q = (galSearch && galSearch.value ? galSearch.value : '').toLowerCase();
-    const tiles = galGrid.querySelectorAll('.tile');
-    let shown = 0;
-    tiles.forEach(t=>{
-      const url = (t.getAttribute('data-url') || '').toLowerCase();
-      const ok = !q || url.includes(q);
-      t.style.display = ok ? '' : 'none';
-      if(ok) shown++;
+/* ─── GALLERY FILTER ─── */
+function setupGalleryFilter(){
+  const galGrid=document.getElementById('galGrid');
+  const galSearch=document.getElementById('galSearch');
+  const galCount=document.getElementById('galCount');
+  if(!galSearch||!galGrid)return;
+  function apply(){
+    const q=galSearch.value.toLowerCase();
+    let n=0;
+    galGrid.querySelectorAll('.tile').forEach(t=>{
+      const ok=!q||(t.getAttribute('data-url')||'').toLowerCase().includes(q);
+      t.style.display=ok?'':'none';
+      if(ok)n++;
     });
-    if(galCount) galCount.textContent = String(shown);
+    if(galCount)galCount.textContent=String(n)+' capturas';
   }
-  if(galSearch) galSearch.addEventListener('input', galApply);
-  galApply();
-
-  // Generic table searches
-  wireTableSearch('routesSearch', 'routesTable', 'routesCount');
-  wireTableSearch('reqSearch', 'reqTable', 'reqCount');
-  wireTableSearch('beSearch', 'beTable', 'beCount');
+  galSearch.addEventListener('input',apply);
 }
 
 build();
