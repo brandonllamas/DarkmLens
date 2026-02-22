@@ -134,19 +134,17 @@ class FetchResult:
 # =============================
 class DarkmLens:
     """
-    DarkmLens v4.3 (Darkmoon)
+    DarkmLens v4.4 (Darkmoon)
     - Defensive passive analysis (authorized only).
-    - NEW in v4.3:
-      * Threading / parallel fetch:
-        - assets (JS/CSS)
-        - crawl (same-origin) using a work queue
-        - authz audit routes
-        - deep-endpoints scripts per visited HTML
-      * Thread-local requests session to avoid sharing Session across threads
-      * Extra CLI: --threads / --asset-threads / --crawl-threads / --authz-threads / --deep-threads
+    - v4.3: Threading / parallel fetch, deep-endpoints.
+    - v4.4 NEW:
+      * Directory fuzzing (--fuzz) with built-in ~200 path wordlist
+      * Directory listing detection (auto on fuzz + crawl)
+      * Google dorks generation (passive, on by default)
+      * Firebase probing: open RTDB, Firestore, Storage (--probe-firebase)
     """
 
-    VERSION = "4.3"
+    VERSION = "4.4"
 
     ABS_URL_RE = re.compile(r'https?://[^\s"\'<>]+(?:\?[^\s"\'<>]+)?', re.IGNORECASE)
 
@@ -286,6 +284,140 @@ class DarkmLens:
         r'^\/(?:api|graphql|gql|rest|services|v\d+[\/]|auth|oauth|token|webhook|webhooks|ws|socket\.io|rpc|trpc|swagger|openapi|actuator|admin\/api|_next\/data)',
         re.IGNORECASE
     )
+    # ── Directory Listing detection ───────────────────────────────────────
+    DIRLIST_INDICATORS = [
+        re.compile(r'<title>\s*Index\s+of\s+/', re.IGNORECASE),
+        re.compile(r'<h1>\s*Index\s+of\s+/', re.IGNORECASE),
+        re.compile(r'Directory\s+listing\s+for\b', re.IGNORECASE),
+        re.compile(r'<pre>.*<a\s+href="[^"]*/">', re.IGNORECASE | re.DOTALL),
+        re.compile(r'autoindex\s+on', re.IGNORECASE),
+        re.compile(r'<address>.*Apache/.*Server\s+at', re.IGNORECASE | re.DOTALL),
+        re.compile(r'<address>.*nginx', re.IGNORECASE),
+        re.compile(r'\[To Parent Directory\]', re.IGNORECASE),
+        re.compile(r'<title>.*Directory\s+Listing.*</title>', re.IGNORECASE),
+    ]
+
+    # ── Built-in fuzz wordlist (~200 common paths) ────────────────────────
+    DEFAULT_FUZZ_PATHS = [
+        # Admin panels
+        "/admin", "/admin/", "/administrator", "/admin/login", "/admin/dashboard",
+        "/panel", "/cpanel", "/wp-admin", "/wp-login.php", "/manager", "/manage",
+        "/dashboard", "/portal", "/controlpanel", "/admin-console", "/adminer",
+        "/phpmyadmin", "/pma", "/sql", "/mysql", "/myadmin",
+        # Login / Auth
+        "/login", "/signin", "/signup", "/register", "/auth", "/auth/login",
+        "/oauth", "/sso", "/cas/login", "/accounts/login", "/user/login",
+        # API & docs
+        "/api", "/api/v1", "/api/v2", "/api/v3", "/api/docs", "/api/swagger",
+        "/swagger", "/swagger-ui", "/swagger-ui.html", "/swagger.json", "/swagger.yaml",
+        "/openapi.json", "/openapi.yaml", "/api-docs", "/redoc", "/graphql",
+        "/graphiql", "/playground", "/api/graphql", "/graphql/console",
+        # Config / sensitive files
+        "/.env", "/.env.local", "/.env.production", "/.env.development",
+        "/.env.bak", "/.env.old", "/.env.example",
+        "/.git", "/.git/config", "/.git/HEAD", "/.gitignore",
+        "/.svn", "/.svn/entries", "/.hg",
+        "/.htaccess", "/.htpasswd", "/web.config", "/crossdomain.xml",
+        "/robots.txt", "/sitemap.xml", "/sitemap_index.xml",
+        "/security.txt", "/.well-known/security.txt",
+        "/humans.txt", "/ads.txt",
+        # Backups
+        "/backup", "/backups", "/bak", "/dump", "/dump.sql",
+        "/database.sql", "/db.sql", "/data.sql", "/backup.sql",
+        "/backup.zip", "/backup.tar.gz", "/backup.rar",
+        "/site.zip", "/site.tar.gz", "/www.zip",
+        "/old", "/archive", "/temp", "/tmp",
+        # WordPress
+        "/wp-content", "/wp-includes", "/wp-json", "/wp-json/wp/v2/users",
+        "/xmlrpc.php", "/wp-config.php", "/wp-config.php.bak",
+        "/wp-cron.php", "/readme.html", "/license.txt",
+        # Common frameworks
+        "/server-status", "/server-info",
+        "/actuator", "/actuator/health", "/actuator/env", "/actuator/info",
+        "/elmah.axd", "/trace.axd",
+        "/_debug", "/debug", "/debug/default/view",
+        "/info.php", "/phpinfo.php", "/test.php", "/info",
+        "/console", "/rails/info/routes",
+        "/__debug__", "/silk/",
+        "/docs", "/redoc",
+        # Firebase / cloud
+        "/__/firebase/init.js", "/__/firebase/init.json",
+        "/__/auth/handler", "/__/auth/iframe",
+        "/firebase-messaging-sw.js", "/manifest.json",
+        "/_ah/health", "/healthz", "/health", "/healthcheck", "/status", "/ping",
+        # CI/CD & DevOps
+        "/.github", "/.gitlab-ci.yml", "/.circleci/config.yml",
+        "/Jenkinsfile", "/Dockerfile", "/docker-compose.yml",
+        "/.dockerignore", "/Procfile", "/Makefile",
+        "/.travis.yml", "/.drone.yml",
+        # Package / dependency files
+        "/package.json", "/package-lock.json", "/yarn.lock",
+        "/composer.json", "/composer.lock", "/Gemfile", "/Gemfile.lock",
+        "/requirements.txt", "/Pipfile", "/Pipfile.lock",
+        "/pom.xml", "/build.gradle",
+        # Misc sensitive
+        "/config", "/config.json", "/config.yml", "/config.yaml",
+        "/settings.json", "/settings.yml",
+        "/.DS_Store", "/Thumbs.db",
+        "/error", "/errors", "/error_log", "/error.log",
+        "/access.log", "/debug.log",
+        "/uploads", "/upload", "/files", "/media", "/assets",
+        "/static", "/public", "/private", "/internal",
+        "/cgi-bin", "/cgi-bin/",
+        "/vendor", "/node_modules", "/bower_components",
+        # CMS & ecommerce
+        "/cms", "/joomla", "/drupal", "/magento",
+        "/shop", "/store", "/cart", "/checkout",
+        # Webmail & tools
+        "/webmail", "/mail", "/roundcube", "/squirrelmail",
+        "/owa", "/autodiscover/autodiscover.xml",
+        # Storage / data
+        "/data", "/db", "/database", "/storage", "/var",
+        "/logs", "/log",
+        # Testing / staging
+        "/test", "/testing", "/staging", "/dev", "/development",
+        "/beta", "/alpha", "/sandbox", "/demo",
+        # SSO / identity
+        "/saml", "/saml/metadata", "/.well-known/openid-configuration",
+        "/oauth/authorize", "/oauth/token",
+    ]
+
+    # ── Google Dork templates ─────────────────────────────────────────────
+    GOOGLE_DORK_TEMPLATES = [
+        {"cat": "Admin Panels", "tpl": 'site:{domain} inurl:admin', "desc": "Páginas de administración"},
+        {"cat": "Admin Panels", "tpl": 'site:{domain} inurl:login', "desc": "Páginas de login"},
+        {"cat": "Admin Panels", "tpl": 'site:{domain} inurl:dashboard', "desc": "Dashboards expuestos"},
+        {"cat": "Admin Panels", "tpl": 'site:{domain} intitle:"panel" inurl:admin', "desc": "Panel de administración"},
+        {"cat": "Archivos Sensibles", "tpl": 'site:{domain} ext:sql', "desc": "Archivos SQL expuestos"},
+        {"cat": "Archivos Sensibles", "tpl": 'site:{domain} ext:env', "desc": "Archivos .env expuestos"},
+        {"cat": "Archivos Sensibles", "tpl": 'site:{domain} ext:log', "desc": "Archivos de log"},
+        {"cat": "Archivos Sensibles", "tpl": 'site:{domain} ext:bak', "desc": "Archivos de backup"},
+        {"cat": "Archivos Sensibles", "tpl": 'site:{domain} ext:conf OR ext:cfg', "desc": "Archivos de configuración"},
+        {"cat": "Archivos Sensibles", "tpl": 'site:{domain} ext:xml inurl:config', "desc": "Configs XML"},
+        {"cat": "Archivos Sensibles", "tpl": 'site:{domain} ext:json inurl:config', "desc": "Configs JSON"},
+        {"cat": "Archivos Sensibles", "tpl": 'site:{domain} ext:yml OR ext:yaml', "desc": "Archivos YAML"},
+        {"cat": "Directory Listing", "tpl": 'site:{domain} intitle:"index of"', "desc": "Directorios abiertos"},
+        {"cat": "Directory Listing", "tpl": 'site:{domain} intitle:"directory listing"', "desc": "Listado de directorios"},
+        {"cat": "Backups", "tpl": 'site:{domain} ext:zip OR ext:rar OR ext:tar.gz', "desc": "Archivos comprimidos"},
+        {"cat": "Backups", "tpl": 'site:{domain} ext:sql "INSERT INTO" OR "CREATE TABLE"', "desc": "Dumps de base de datos"},
+        {"cat": "Backups", "tpl": 'site:{domain} inurl:backup', "desc": "Rutas de backup"},
+        {"cat": "Firebase / Cloud", "tpl": 'site:{domain} inurl:firebaseio', "desc": "Firebase RTDB expuesto"},
+        {"cat": "Firebase / Cloud", "tpl": 'site:{domain} inurl:__/firebase', "desc": "Firebase hosting config"},
+        {"cat": "Firebase / Cloud", "tpl": 'site:firebasestorage.googleapis.com "{domain}"', "desc": "Firebase Storage público"},
+        {"cat": "Firebase / Cloud", "tpl": 'site:{domain} inurl:.firebaseapp.com', "desc": "Firebase App URL"},
+        {"cat": "Backend / API", "tpl": 'site:{domain} inurl:api', "desc": "Endpoints de API"},
+        {"cat": "Backend / API", "tpl": 'site:{domain} inurl:graphql', "desc": "Endpoints GraphQL"},
+        {"cat": "Backend / API", "tpl": 'site:{domain} inurl:swagger OR inurl:api-docs', "desc": "Documentación API"},
+        {"cat": "Backend / API", "tpl": 'site:{domain} ext:json inurl:openapi', "desc": "OpenAPI spec"},
+        {"cat": "Info Disclosure", "tpl": 'site:{domain} intitle:"phpinfo()"', "desc": "phpinfo() expuesto"},
+        {"cat": "Info Disclosure", "tpl": 'site:{domain} intext:"password" ext:log', "desc": "Passwords en logs"},
+        {"cat": "Info Disclosure", "tpl": 'site:{domain} intext:"DB_PASSWORD" OR intext:"DB_HOST"', "desc": "Credenciales de DB"},
+        {"cat": "Info Disclosure", "tpl": 'site:{domain} inurl:.git', "desc": "Repositorio Git expuesto"},
+        {"cat": "Info Disclosure", "tpl": 'site:{domain} inurl:wp-config', "desc": "WordPress config expuesto"},
+        {"cat": "Errores Expuestos", "tpl": 'site:{domain} intext:"SQL syntax" OR intext:"mysql_fetch"', "desc": "Errores SQL"},
+        {"cat": "Errores Expuestos", "tpl": 'site:{domain} intext:"Warning:" intext:"on line"', "desc": "PHP warnings"},
+        {"cat": "Errores Expuestos", "tpl": 'site:{domain} intext:"stack trace" OR intext:"traceback"', "desc": "Stack traces"},
+    ]
 
     def __init__(
         self,
@@ -316,6 +448,18 @@ class DarkmLens:
 
         # NEW
         deep_endpoints: bool = False,
+
+        # v4.4: Fuzzing
+        fuzz: bool = False,
+        fuzz_wordlist_file: Optional[str] = None,
+        fuzz_max: int = 500,
+        fuzz_threads: Optional[int] = None,
+
+        # v4.4: Google dorks (passive)
+        google_dorks: bool = True,
+
+        # v4.4: Firebase probing (active)
+        probe_firebase: bool = False,
 
         # THREADS
         threads: int = 12,
@@ -350,12 +494,20 @@ class DarkmLens:
         self.deep_endpoints = deep_endpoints
         self.verbose = False  # set via CLI
 
+        # v4.4 new modules
+        self.fuzz = fuzz
+        self.fuzz_wordlist_file = fuzz_wordlist_file
+        self.fuzz_max = fuzz_max
+        self.google_dorks = google_dorks
+        self.probe_firebase = probe_firebase
+
         # Thread controls
         self.threads = max(1, int(threads))
         self.asset_threads = max(1, int(asset_threads if asset_threads is not None else self.threads))
         self.crawl_threads = max(1, int(crawl_threads if crawl_threads is not None else min(self.threads, 10)))
         self.authz_threads = max(1, int(authz_threads if authz_threads is not None else min(self.threads, 20)))
         self.deep_threads = max(1, int(deep_threads if deep_threads is not None else min(self.threads, 10)))
+        self.fuzz_thread_count = max(1, int(fuzz_threads if fuzz_threads is not None else min(self.threads, 20)))
 
         safe_mkdir(self.out_dir)
         safe_mkdir(os.path.join(self.out_dir, "routes"))
@@ -477,12 +629,30 @@ class DarkmLens:
                 "routes": [],
             },
             "notes": [],
+            "fuzzing": {
+                "enabled": fuzz,
+                "paths_tested": 0,
+                "found": [],
+                "dir_listings": [],
+            },
+            "google_dorks": {
+                "domain": "",
+                "queries": [],
+            },
+            "firebase_probing": {
+                "enabled": probe_firebase,
+                "firestore_open": [],
+                "rtdb_open": [],
+                "storage_open": [],
+            },
             "stats": {
                 "assets_fetched": 0,
                 "maps_found": 0,
                 "maps_fetched": 0,
                 "pages_visited": 0,
-                "authz_routes_tested": 0
+                "authz_routes_tested": 0,
+                "fuzz_paths_tested": 0,
+                "fuzz_found": 0,
             }
         }
 
@@ -502,7 +672,14 @@ class DarkmLens:
         print(f"{Fore.MAGENTA}   DarkmLens v{self.VERSION}  |  Darkmoon | Red Team Barranquilla")
         print(f"{Fore.CYAN}========================================")
         print(f"{Fore.YELLOW}Uso autorizado únicamente. Análisis pasivo.\n")
-        print(f"{Fore.CYAN}Threads: global={self.threads} assets={self.asset_threads} crawl={self.crawl_threads} authz={self.authz_threads} deep={self.deep_threads}\n")
+        print(f"{Fore.CYAN}Threads: global={self.threads} assets={self.asset_threads} crawl={self.crawl_threads} authz={self.authz_threads} deep={self.deep_threads} fuzz={self.fuzz_thread_count}")
+        features = []
+        if self.fuzz: features.append("FUZZ")
+        if self.google_dorks: features.append("DORKS")
+        if self.probe_firebase: features.append("FIREBASE-PROBE")
+        if self.deep_endpoints: features.append("DEEP")
+        if self.audit_authz: features.append("AUTHZ")
+        print(f"{Fore.CYAN}Modules: {', '.join(features) if features else 'default'}\n")
 
     # -----------------------------
     # Thread-local session
@@ -1445,6 +1622,14 @@ class DarkmLens:
                 mark_page_taken()
 
                 if "html" in (fr.content_type or "") and fr.text:
+                    # v4.4: detect directory listings during crawl
+                    if self._check_directory_listing(fr.text):
+                        dl_entry = {"path": urlparse(url).path, "url": url, "status": fr.status,
+                                    "ct": fr.content_type, "size": len(fr.text), "dir_listing": True,
+                                    "redirect_to": None, "elapsed_ms": fr.elapsed_ms, "source": "crawl"}
+                        with self._results_lock:
+                            self.results["fuzzing"]["dir_listings"].append(dl_entry)
+                        print(f"{Fore.RED}[!] DIR LISTING detectado (crawl): {url}")
                     try:
                         soup = BeautifulSoup(fr.text, "html.parser")
                     except Exception:
@@ -1604,6 +1789,15 @@ class DarkmLens:
 
         if self.audit_authz:
             self._authz_audit_routes(base)
+
+        # v4.4: New modules
+        self._generate_google_dorks()
+
+        if self.fuzz:
+            self._fuzz_directories(base)
+
+        if self.probe_firebase:
+            self._probe_firebase_access(base)
 
         self._dedup_findings()
 
@@ -1882,6 +2076,317 @@ class DarkmLens:
             self.results["authz_audit"]["items"] = items
 
     # -----------------------------
+    # v4.4: Directory listing check
+    # -----------------------------
+    def _check_directory_listing(self, html: str) -> bool:
+        """Check if HTML response indicates an open directory listing."""
+        if not html:
+            return False
+        snippet = html[:8000]
+        for rx in self.DIRLIST_INDICATORS:
+            if rx.search(snippet):
+                return True
+        return False
+
+    # -----------------------------
+    # v4.4: Directory fuzzing
+    # -----------------------------
+    def _fuzz_directories(self, base_origin: str):
+        """Fuzz common directories/files against the target. Threaded."""
+        if not self.fuzz:
+            return
+
+        print(f"{Fore.CYAN}[*] Fuzzing directorios [THREADS={self.fuzz_thread_count}] ...")
+
+        # Build wordlist
+        paths = list(self.DEFAULT_FUZZ_PATHS)
+        if self.fuzz_wordlist_file:
+            try:
+                with open(self.fuzz_wordlist_file, "r", encoding="utf-8", errors="ignore") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith("#"):
+                            if not line.startswith("/"):
+                                line = "/" + line
+                            paths.append(line)
+                print(f"{Fore.CYAN}[*] Wordlist cargada: {self.fuzz_wordlist_file} (+{len(paths) - len(self.DEFAULT_FUZZ_PATHS)} paths)")
+            except Exception as e:
+                with self._results_lock:
+                    self.results["notes"].append(f"Fuzz wordlist error: {e}")
+
+        paths = uniq_list(paths)[: self.fuzz_max]
+
+        fuzz_found_lock = threading.Lock()
+        fuzz_found: List[dict] = []
+        dir_listings: List[dict] = []
+        tested = [0]
+        tested_lock = threading.Lock()
+
+        def fuzz_worker(path: str):
+            if self._stop_event.is_set():
+                return
+            url = urljoin(base_origin, path)
+            fr = self.fetch(url)
+            if self.sleep_between:
+                time.sleep(self.sleep_between)
+
+            with tested_lock:
+                tested[0] += 1
+
+            if not fr:
+                return
+
+            # Skip 404
+            if fr.status == 404:
+                return
+
+            is_dir_listing = False
+            if fr.status < 400 and "html" in (fr.content_type or ""):
+                is_dir_listing = self._check_directory_listing(fr.text)
+
+            redirect_to = None
+            if fr.status in (301, 302, 303, 307, 308):
+                redirect_to = fr.headers.get("Location") or fr.headers.get("location")
+
+            size = len(fr.text) if fr.text else 0
+
+            entry = {
+                "path": path,
+                "url": url,
+                "status": fr.status,
+                "ct": fr.content_type,
+                "size": size,
+                "dir_listing": is_dir_listing,
+                "redirect_to": redirect_to,
+                "elapsed_ms": fr.elapsed_ms,
+            }
+
+            with fuzz_found_lock:
+                fuzz_found.append(entry)
+                if is_dir_listing:
+                    dir_listings.append(entry)
+
+            if self.verbose:
+                tag = f" [DIR LISTING!]" if is_dir_listing else ""
+                redir_tag = f" -> {redirect_to}" if redirect_to else ""
+                print(f"{Fore.GREEN}[FUZZ] {fr.status} {path} ({size}b){tag}{redir_tag}")
+
+        with ThreadPoolExecutor(max_workers=self.fuzz_thread_count) as ex:
+            futs = [ex.submit(fuzz_worker, p) for p in paths]
+            for _ in as_completed(futs):
+                if self._stop_event.is_set():
+                    break
+
+        # Sort by status code for readability
+        fuzz_found.sort(key=lambda x: (x["status"], x["path"]))
+
+        with self._results_lock:
+            self.results["fuzzing"]["found"] = fuzz_found
+            self.results["fuzzing"]["dir_listings"] = dir_listings
+            self.results["fuzzing"]["paths_tested"] = tested[0]
+        with self._stats_lock:
+            self.results["stats"]["fuzz_paths_tested"] = tested[0]
+            self.results["stats"]["fuzz_found"] = len(fuzz_found)
+
+        # Summary
+        by_status = {}
+        for e in fuzz_found:
+            s = e["status"]
+            by_status[s] = by_status.get(s, 0) + 1
+        status_summary = " · ".join(f"{s}={c}" for s, c in sorted(by_status.items()))
+        print(f"{Fore.GREEN}[+] Fuzzing completado: {tested[0]} paths → {len(fuzz_found)} encontrados ({status_summary})")
+        if dir_listings:
+            print(f"{Fore.RED}[!] {len(dir_listings)} DIRECTORY LISTING(s) detectados!")
+            for dl in dir_listings:
+                print(f"{Fore.RED}    → {dl['path']}")
+
+    # -----------------------------
+    # v4.4: Google dorks generation
+    # -----------------------------
+    def _generate_google_dorks(self):
+        """Generate Google dork queries for the target domain (passive, no network)."""
+        if not self.google_dorks:
+            return
+
+        try:
+            domain = urlparse(self.target_url).netloc
+            if not domain:
+                return
+        except Exception:
+            return
+
+        print(f"{Fore.CYAN}[*] Generando Google dorks para {domain}...")
+
+        queries = []
+        for tmpl in self.GOOGLE_DORK_TEMPLATES:
+            dork = tmpl["tpl"].replace("{domain}", domain)
+            google_url = f"https://www.google.com/search?q={requests.utils.quote(dork)}"
+            queries.append({
+                "category": tmpl["cat"],
+                "dork": dork,
+                "description": tmpl["desc"],
+                "google_url": google_url,
+            })
+
+        with self._results_lock:
+            self.results["google_dorks"]["domain"] = domain
+            self.results["google_dorks"]["queries"] = queries
+
+        print(f"{Fore.GREEN}[+] {len(queries)} Google dorks generados para {domain}")
+
+    # -----------------------------
+    # v4.4: Firebase probing
+    # -----------------------------
+    def _probe_firebase_access(self, base_origin: str):
+        """Probe discovered Firebase resources for open read access."""
+        if not self.probe_firebase:
+            return
+
+        print(f"{Fore.CYAN}[*] Probing Firebase para acceso abierto...")
+
+        # Collect project IDs and storage buckets from parsed configs
+        project_ids: Set[str] = set()
+        storage_buckets: Set[str] = set()
+        collections: Set[str] = set()
+
+        with self._results_lock:
+            for cfg in self.results.get("firebase", {}).get("configs_parsed", []):
+                fields = cfg.get("fields", {})
+                pid = fields.get("projectId")
+                if pid:
+                    project_ids.add(pid)
+                sb = fields.get("storageBucket")
+                if sb:
+                    storage_buckets.add(sb)
+            for col in self.results.get("firebase", {}).get("collections_probable", []):
+                name = col.get("name")
+                if name:
+                    collections.add(name)
+
+        if not project_ids and not storage_buckets:
+            with self._results_lock:
+                self.results["notes"].append("Firebase probing: no se encontraron projectId ni storageBucket para probar.")
+            return
+
+        # 1. Test RTDB open read
+        for pid in project_ids:
+            rtdb_url = f"https://{pid}-default-rtdb.firebaseio.com/.json?shallow=true"
+            print(f"{Fore.BLUE}[*] RTDB probe: {rtdb_url}")
+            fr = self.fetch(rtdb_url)
+            if self.sleep_between:
+                time.sleep(self.sleep_between)
+            if fr and fr.status == 200 and fr.text and fr.text.strip() != "null":
+                try:
+                    data = json.loads(fr.text)
+                    keys = list(data.keys())[:20] if isinstance(data, dict) else []
+                except Exception:
+                    keys = []
+                self.add_finding(self.results["firebase_probing"]["rtdb_open"], {
+                    "project": pid,
+                    "url": rtdb_url,
+                    "status": fr.status,
+                    "keys_sample": keys,
+                    "open": True,
+                })
+                print(f"{Fore.RED}[!] RTDB ABIERTO: {rtdb_url} → keys: {keys}")
+            elif fr:
+                self.add_finding(self.results["firebase_probing"]["rtdb_open"], {
+                    "project": pid,
+                    "url": rtdb_url,
+                    "status": fr.status,
+                    "open": False,
+                })
+
+            # Also try without -default-rtdb
+            rtdb_url2 = f"https://{pid}.firebaseio.com/.json?shallow=true"
+            if rtdb_url2 != rtdb_url:
+                fr2 = self.fetch(rtdb_url2)
+                if self.sleep_between:
+                    time.sleep(self.sleep_between)
+                if fr2 and fr2.status == 200 and fr2.text and fr2.text.strip() != "null":
+                    try:
+                        data = json.loads(fr2.text)
+                        keys = list(data.keys())[:20] if isinstance(data, dict) else []
+                    except Exception:
+                        keys = []
+                    self.add_finding(self.results["firebase_probing"]["rtdb_open"], {
+                        "project": pid,
+                        "url": rtdb_url2,
+                        "status": fr2.status,
+                        "keys_sample": keys,
+                        "open": True,
+                    })
+                    print(f"{Fore.RED}[!] RTDB ABIERTO: {rtdb_url2} → keys: {keys}")
+
+        # 2. Test Firestore open read per collection
+        for pid in project_ids:
+            for col in list(collections)[:15]:
+                fs_url = f"https://firestore.googleapis.com/v1/projects/{pid}/databases/(default)/documents/{col}?pageSize=1"
+                print(f"{Fore.BLUE}[*] Firestore probe: {col} @ {pid}")
+                fr = self.fetch(fs_url)
+                if self.sleep_between:
+                    time.sleep(self.sleep_between)
+                if fr and fr.status == 200 and fr.text:
+                    try:
+                        data = json.loads(fr.text)
+                        docs = data.get("documents", [])
+                        doc_count = len(docs)
+                    except Exception:
+                        doc_count = 0
+                    self.add_finding(self.results["firebase_probing"]["firestore_open"], {
+                        "project": pid,
+                        "collection": col,
+                        "url": fs_url,
+                        "status": fr.status,
+                        "docs_returned": doc_count,
+                        "open": True,
+                    })
+                    print(f"{Fore.RED}[!] Firestore ABIERTO: {col} @ {pid} ({doc_count} docs)")
+                elif fr:
+                    if fr.status in (403, 401):
+                        pass  # protected, skip
+                    else:
+                        self.add_finding(self.results["firebase_probing"]["firestore_open"], {
+                            "project": pid,
+                            "collection": col,
+                            "url": fs_url,
+                            "status": fr.status,
+                            "open": False,
+                        })
+
+        # 3. Test Storage bucket listing
+        for sb in storage_buckets:
+            storage_url = f"https://firebasestorage.googleapis.com/v0/b/{sb}/o?maxResults=5"
+            print(f"{Fore.BLUE}[*] Storage probe: {sb}")
+            fr = self.fetch(storage_url)
+            if self.sleep_between:
+                time.sleep(self.sleep_between)
+            if fr and fr.status == 200 and fr.text:
+                try:
+                    data = json.loads(fr.text)
+                    items = data.get("items", [])
+                    names = [it.get("name", "") for it in items[:10]]
+                except Exception:
+                    names = []
+                self.add_finding(self.results["firebase_probing"]["storage_open"], {
+                    "bucket": sb,
+                    "url": storage_url,
+                    "status": fr.status,
+                    "files_sample": names,
+                    "open": True,
+                })
+                print(f"{Fore.RED}[!] Storage ABIERTO: {sb} → files: {names}")
+            elif fr:
+                self.add_finding(self.results["firebase_probing"]["storage_open"], {
+                    "bucket": sb,
+                    "url": storage_url,
+                    "status": fr.status,
+                    "open": False,
+                })
+
+        print(f"{Fore.GREEN}[+] Firebase probing completado.")
+
+    # -----------------------------
     # App stack identification
     # -----------------------------
     def _identify_app_stack(self):
@@ -2154,7 +2659,7 @@ def parse_headers(args: argparse.Namespace) -> Dict[str, str]:
 
 
 def main():
-    p = argparse.ArgumentParser(description="DarkmLens v4.3 (Darkmoon) - Passive exposure report (authorized only)")
+    p = argparse.ArgumentParser(description="DarkmLens v4.4 (Darkmoon) - Passive exposure report + active recon (authorized only)")
     p.add_argument("url", help="Target URL (https://example.com/path)")
     p.add_argument("--out", default="out", help="Output folder")
     p.add_argument("--max-assets", type=int, default=120, help="Max same-origin assets to fetch")
@@ -2198,6 +2703,18 @@ def main():
     p.add_argument("--authz-threads", type=int, default=None, help="Threads for authz audit (default: min(--threads,20))")
     p.add_argument("--deep-threads", type=int, default=None, help="Threads for deep-endpoints script fetch (default: min(--threads,10))")
 
+    # v4.4: Fuzzing
+    p.add_argument("--fuzz", action="store_true", help="Enable directory fuzzing (active recon, off by default)")
+    p.add_argument("--fuzz-wordlist", help="Custom wordlist file (one path per line, extends built-in list)")
+    p.add_argument("--fuzz-threads", type=int, default=None, help="Threads for fuzzing (default: min(--threads,20))")
+    p.add_argument("--fuzz-max", type=int, default=500, help="Max paths to fuzz (default 500)")
+
+    # v4.4: Google dorks
+    p.add_argument("--no-dorks", action="store_true", help="Disable Google dork generation")
+
+    # v4.4: Firebase probing
+    p.add_argument("--probe-firebase", action="store_true", help="Probe Firebase for open RTDB/Firestore/Storage (active, off by default)")
+
     args = p.parse_args()
 
     if args.audit_authz_limit is not None:
@@ -2234,6 +2751,14 @@ def main():
         ai_model=args.ai_model,
 
         deep_endpoints=args.deep_endpoints,
+
+        # v4.4
+        fuzz=args.fuzz,
+        fuzz_wordlist_file=args.fuzz_wordlist,
+        fuzz_max=args.fuzz_max,
+        fuzz_threads=args.fuzz_threads,
+        google_dorks=not args.no_dorks,
+        probe_firebase=args.probe_firebase,
 
         threads=args.threads,
         asset_threads=args.asset_threads,
@@ -2526,6 +3051,9 @@ function build(){
     <div class="stat"><div class="stat-n">${(inv.routes_full_urls||[]).filter(r=>r.route_type==='backend').length + (ep.absolute||[]).length + (ep.relative||[]).length}</div><div class="stat-l">Endpoints API</div></div>
     <div class="stat"><div class="stat-n">${(ep.requests_inferred||[]).length}</div><div class="stat-l">Requests inferidos</div></div>
     <div class="stat"><div class="stat-n">${esc(stats.authz_routes_tested||0)}</div><div class="stat-l">AuthZ testeados</div></div>
+    <div class="stat"><div class="stat-n">${esc(stats.fuzz_paths_tested||0)}</div><div class="stat-l">Fuzz paths</div></div>
+    <div class="stat"><div class="stat-n">${esc(stats.fuzz_found||0)}</div><div class="stat-l">Fuzz encontrados</div></div>
+    <div class="stat"><div class="stat-n">${(RESULTS.google_dorks||{}).queries?((RESULTS.google_dorks||{}).queries||[]).length:0}</div><div class="stat-l">Google Dorks</div></div>
   </div>
 
   <!-- TECHNOLOGIES -->
@@ -2559,6 +3087,15 @@ function build(){
   <!-- CONFIGS EXPUESTOS -->
   ${buildExposedConfigs()}
 
+  <!-- v4.4: FUZZING -->
+  ${buildFuzzing()}
+
+  <!-- v4.4: GOOGLE DORKS -->
+  ${buildGoogleDorks()}
+
+  <!-- v4.4: FIREBASE PROBING -->
+  ${buildFirebaseProbing()}
+
   <!-- SCREENSHOT GALLERY -->
   ${buildGallery()}
 
@@ -2575,6 +3112,9 @@ function build(){
   wireSearch('beSearch','beTable','beCount');
   wireSearch('reqSearch','reqTable','reqCount');
   wireSearch('authSearch','authTable','authCount');
+
+  wireSearch('fuzzSearch','fuzzTable','fuzzCount');
+  wireSearch('dorkSearch','dorkTable','dorkCount');
 
   /* authz filters */
   setupAuthzFilters();
@@ -2879,6 +3419,123 @@ function buildExposedConfigs(){
   <div class="section">
     <div class="section-h"><div class="section-title"><span class="ico ico-orange">⚠</span>Configs Expuestas</div></div>
     <div class="card"><div class="card-b">${html}</div></div>
+  </div>`;
+}
+
+/* ─── v4.4: FUZZING ─── */
+function buildFuzzing(){
+  const fz=RESULTS.fuzzing||{};
+  const found=fz.found||[];
+  const dirs=fz.dir_listings||[];
+  if(!found.length&&!dirs.length)return '';
+  const rows=found.slice(0,300).map(x=>[
+    statusBadge(x.status),
+    `<code>${esc(x.path||'')}</code>`,
+    `<a href="${esc(x.url||'')}" target="_blank">${esc(x.url||'')}</a>`,
+    x.dir_listing?badge('DIR LISTING','badge-red'):'—',
+    `${esc(x.size||0)} b`,
+    x.redirect_to?`<span class="t-mini">${esc(x.redirect_to)}</span>`:'—',
+    `${esc(x.elapsed_ms||0)} ms`,
+  ]);
+  return `
+  <div class="section">
+    <div class="section-h">
+      <div class="section-title"><span class="ico ico-red">🔎</span>Directory Fuzzing</div>
+      <span class="count-badge">Mostrando <b id="fuzzCount">${Math.min(found.length,300)}</b> de ${found.length} · ${dirs.length} dir listings</span>
+    </div>
+    ${dirs.length?`<div class="card" style="margin-bottom:14px;border-color:rgba(255,77,109,0.30)"><div class="card-b" style="color:var(--red)">
+      <b>⚠ Directory Listing(s) detectados:</b><ul style="font-size:12px;margin-top:6px">${dirs.map(d=>`<li><a href="${esc(d.url||'')}" target="_blank">${esc(d.path||'')}</a></li>`).join('')}</ul>
+    </div></div>`:''}
+    <div class="controls">
+      <input id="fuzzSearch" class="search" placeholder="Buscar path, status..."/>
+    </div>
+    ${tbl(['Status','Path','URL','Dir Listing','Size','Redirect','Tiempo'],rows,'fuzzTable')}
+  </div>`;
+}
+
+/* ─── v4.4: GOOGLE DORKS ─── */
+function buildGoogleDorks(){
+  const gd=RESULTS.google_dorks||{};
+  const queries=gd.queries||[];
+  if(!queries.length)return '';
+  const cats=[...new Set(queries.map(q=>q.category))];
+  const rows=queries.map(q=>[
+    badge(q.category||'','badge-purple'),
+    `<code>${esc(q.dork||'')}</code>`,
+    esc(q.description||''),
+    `<a href="${esc(q.google_url||'')}" target="_blank" rel="noopener">Buscar 🔗</a>`,
+  ]);
+  return `
+  <div class="section">
+    <div class="section-h">
+      <div class="section-title"><span class="ico ico-green">🌐</span>Google Dorks</div>
+      <span class="count-badge">Mostrando <b id="dorkCount">${queries.length}</b> queries · ${cats.length} categorías · Dominio: <b>${esc(gd.domain||'')}</b></span>
+    </div>
+    <div class="controls">
+      <input id="dorkSearch" class="search" placeholder="Buscar dork, categoría..."/>
+    </div>
+    ${tbl(['Categoría','Dork Query','Descripción','Acción'],rows,'dorkTable')}
+    <div class="muted" style="margin-top:8px">💡 Los dorks se generan localmente (pasivo). Haz clic en "Buscar" para ejecutarlos en Google.</div>
+  </div>`;
+}
+
+/* ─── v4.4: FIREBASE PROBING ─── */
+function buildFirebaseProbing(){
+  const fp=RESULTS.firebase_probing||{};
+  const rtdb=fp.rtdb_open||[];
+  const fs=fp.firestore_open||[];
+  const st=fp.storage_open||[];
+  const openRtdb=rtdb.filter(x=>x.open);
+  const openFs=fs.filter(x=>x.open);
+  const openSt=st.filter(x=>x.open);
+  if(!rtdb.length&&!fs.length&&!st.length)return '';
+
+  let html='';
+  if(openRtdb.length){
+    html+=`<div class="sep"></div><div style="font-size:11px;color:var(--red);margin-bottom:8px;font-weight:600;text-transform:uppercase">⚠ RTDB ABIERTO</div>`;
+    openRtdb.forEach(r=>{
+      html+=`<div style="margin-bottom:8px"><a href="${esc(r.url||'')}" target="_blank">${esc(r.url||'')}</a>
+      ${(r.keys_sample||[]).length?`<div class="muted">Keys: ${(r.keys_sample||[]).map(k=>badge(k,'badge-orange')).join('')}</div>`:''}</div>`;
+    });
+  }
+  if(openFs.length){
+    html+=`<div class="sep"></div><div style="font-size:11px;color:var(--red);margin-bottom:8px;font-weight:600;text-transform:uppercase">⚠ Firestore ABIERTO</div>`;
+    openFs.forEach(r=>{
+      html+=`<div style="margin-bottom:8px"><b>${esc(r.collection||'')}</b> @ ${esc(r.project||'')}
+      <div class="muted">${esc(r.docs_returned||0)} doc(s) devueltos · <a href="${esc(r.url||'')}" target="_blank">ver</a></div></div>`;
+    });
+  }
+  if(openSt.length){
+    html+=`<div class="sep"></div><div style="font-size:11px;color:var(--red);margin-bottom:8px;font-weight:600;text-transform:uppercase">⚠ Storage ABIERTO</div>`;
+    openSt.forEach(r=>{
+      html+=`<div style="margin-bottom:8px"><b>${esc(r.bucket||'')}</b>
+      ${(r.files_sample||[]).length?`<div class="muted">Archivos: ${(r.files_sample||[]).map(f=>badge(f,'badge-orange')).join('')}</div>`:''}
+      <div class="muted"><a href="${esc(r.url||'')}" target="_blank">ver</a></div></div>`;
+    });
+  }
+
+  // Closed probes summary
+  const closedRtdb=rtdb.filter(x=>!x.open);
+  const closedFs=fs.filter(x=>!x.open);
+  const closedSt=st.filter(x=>!x.open);
+  if(closedRtdb.length||closedFs.length||closedSt.length){
+    html+=`<div class="sep"></div><div style="font-size:11px;color:var(--muted);margin-bottom:8px;font-weight:600;text-transform:uppercase">Protegidos (acceso denegado)</div>`;
+    if(closedRtdb.length) html+=`<div class="muted">RTDB: ${closedRtdb.length} endpoint(s) protegidos</div>`;
+    if(closedFs.length) html+=`<div class="muted">Firestore: ${closedFs.length} colección(es) protegida(s)</div>`;
+    if(closedSt.length) html+=`<div class="muted">Storage: ${closedSt.length} bucket(s) protegido(s)</div>`;
+  }
+
+  const totalOpen=openRtdb.length+openFs.length+openSt.length;
+  return `
+  <div class="section">
+    <div class="section-h">
+      <div class="section-title"><span class="ico ico-red">🔥</span>Firebase Probing</div>
+      <span class="count-badge">${totalOpen} abierto(s) · ${rtdb.length+fs.length+st.length} probados</span>
+    </div>
+    <div class="fb-card">
+      <div class="fb-title">${totalOpen?'⚠ Acceso abierto detectado':'✓ Sin acceso abierto'}</div>
+      ${html}
+    </div>
   </div>`;
 }
 
