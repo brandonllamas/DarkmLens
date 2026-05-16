@@ -1,0 +1,7 @@
+{
+  "ai_provider": "ollama",
+  "ai_model": "dolphin-llama3:latest",
+  "ollama_url": "http://192.168.80.19:11434",
+  "lm_studio_url": "",
+  "updated_at": 1775671384
+}

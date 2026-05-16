@@ -12,6 +12,8 @@ import hashlib
 import warnings
 import threading
 import queue
+import shutil
+import subprocess
 from dataclasses import dataclass
 from typing import Dict, List, Set, Optional, Any, Tuple
 from urllib.parse import urljoin, urlparse, parse_qs, urlencode, urlunparse
@@ -19,7 +21,7 @@ from urllib.parse import urljoin, urlparse, parse_qs, urlencode, urlunparse
 import requests
 import urllib3
 from bs4 import BeautifulSoup
-from colorama import Fore, init
+from colorama import Fore, Style, init
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Wappalyzer (opcional)
@@ -130,21 +132,776 @@ class FetchResult:
 
 
 # =============================
+# ReactScan Module (standalone functions)
+# Detección de librerías, versiones y CVEs en aplicaciones React/Next.js
+# =============================
+
+_RS_TIMEOUT = 10
+_RS_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+}
+_RS_MAX_JS_FILES = 50
+
+_RS_MINIFIED_SIGNATURES = [
+    ("react", [
+        r'exports\.version="(\d+\.\d+\.\d+[^"]*)"',
+        r'\.version="(\d+\.\d+\.\d+[^"]*)"[,;].{0,300}createElement',
+        r'createElement[^}]{0,300}\.version="(\d+\.\d+\.\d+[^"]*)"',
+        r'"react"[^}]{0,100}"version":"(\d+\.\d+\.\d+[^"]*)"',
+        r'version:"(\d+\.\d+\.\d+[^"]*)"[,;][^;]{0,100}createElement',
+        r'\{version:"(\d+\.\d+\.\d+[^"]*)"[^}]{0,200}createElement',
+    ]),
+    ("react-dom", [
+        r'"react-dom"[^}]{0,100}"version":"(\d+\.\d+\.\d+[^"]*)"',
+        r'\.version="(\d+\.\d+\.\d+[^"]*)"[,;].{0,300}hydrate',
+        r'hydrate[^;]{0,300}\.version="(\d+\.\d+\.\d+[^"]*)"',
+        r'\{version:"(\d+\.\d+\.\d+[^"]*)"[^}]{0,200}hydrate',
+    ]),
+    ("next", [
+        r'"next":"(\d+\.\d+\.\d+[^"]*)"',
+        r'"next@(\d+\.\d+\.\d+[^"]*)"',
+        r'next/dist[^"]{0,50}"version":"(\d+\.\d+\.\d+[^"]*)"',
+        r'Next\.js\s+v?(\d+\.\d+\.\d+[a-zA-Z0-9.-]*)',
+        r'"version":"(\d+\.\d+\.\d+[^"]*)"[^}]{0,50}"buildId"',
+        r'__NEXT_VERSION[^"]{0,20}"(\d+\.\d+\.\d+[^"]*)"',
+    ]),
+    ("jquery", [
+        r'jQuery\.fn\.jquery="(\d+\.\d+\.\d+[^"]*)"',
+        r'jquery:"(\d+\.\d+\.\d+[^"]*)"',
+        r'jQuery v(\d+\.\d+\.\d+[a-zA-Z0-9.-]*)',
+        r'v(\d+\.\d+\.\d+) jQuery',
+        r'"jquery","(\d+\.\d+\.\d+[^"]*)"',
+    ]),
+    ("lodash", [
+        r'lodash[._]VERSION\s*=\s*"(\d+\.\d+\.\d+[^"]*)"',
+        r'var\s+VERSION\s*=\s*"(\d+\.\d+\.\d+[^"]*)"[^;]{0,200}lodash',
+        r'"lodash"[^}]{0,50}"version":"(\d+\.\d+\.\d+[^"]*)"',
+    ]),
+    ("axios", [
+        r'"axios"[^}]{0,100}"version":"(\d+\.\d+\.\d+[^"]*)"',
+        r'axios/(\d+\.\d+\.\d+[^"/ ]*)',
+        r'"name":"axios","version":"(\d+\.\d+\.\d+[^"]*)"',
+        r'isAxiosError[^"]{0,200}"version":"(\d+\.\d+\.\d+[^"]*)"',
+    ]),
+    ("moment", [
+        r'moment\.version\s*=\s*"(\d+\.\d+\.\d+[^"]*)"',
+        r'"moment"[^}]{0,100}"version":"(\d+\.\d+\.\d+[^"]*)"',
+    ]),
+    ("date-fns",             [r'"date-fns","(\d+\.\d+\.\d+[^"]*)"',
+                              r'"date-fns"[^}]{0,100}"version":"(\d+\.\d+\.\d+[^"]*)"']),
+    ("zustand",              [r'"zustand"[^}]{0,100}"version":"(\d+\.\d+\.\d+[^"]*)"']),
+    ("jotai",                [r'"jotai"[^}]{0,100}"version":"(\d+\.\d+\.\d+[^"]*)"']),
+    ("@tanstack/react-query",[r'"@tanstack/react-query"[^}]{0,100}"version":"(\d+\.\d+\.\d+[^"]*)"',
+                              r'react-query[^"]{0,50}"version":"(\d+\.\d+\.\d+[^"]*)"']),
+    ("tailwindcss",          [r'"tailwindcss"[^}]{0,100}"version":"(\d+\.\d+\.\d+[^"]*)"']),
+    ("next-auth",            [r'"next-auth"[^}]{0,100}"version":"(\d+\.\d+\.\d+[^"]*)"']),
+    ("framer-motion",        [r'"framer-motion"[^}]{0,100}"version":"(\d+\.\d+\.\d+[^"]*)"',
+                              r'framer.motion[^"]{0,50}(\d+\.\d+\.\d+[^"]*)']),
+    ("zod",                  [r'"zod"[^}]{0,100}"version":"(\d+\.\d+\.\d+[^"]*)"']),
+    ("swr",                  [r'"swr"[^}]{0,100}"version":"(\d+\.\d+\.\d+[^"]*)"']),
+    ("@mui/material",        [r'"@mui/material"[^}]{0,100}"version":"(\d+\.\d+\.\d+[^"]*)"']),
+    ("@chakra-ui/react",     [r'"@chakra-ui/react"[^}]{0,100}"version":"(\d+\.\d+\.\d+[^"]*)"']),
+    ("fast-xml-parser",      [r'"fast-xml-parser"[^}]{0,100}"version":"(\d+\.\d+\.\d+[^"]*)"']),
+    ("minimatch",            [r'"minimatch"[^}]{0,100}"version":"(\d+\.\d+\.\d+[^"]*)"']),
+    ("node-forge",           [r'"node-forge"[^}]{0,100}"version":"(\d+\.\d+\.\d+[^"]*)"']),
+]
+
+_RS_FINGERPRINTS = [
+    ("react", "Framework UI", [
+        "__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED",
+        "createElement",
+        "createContext",
+        "__reactFiber",
+    ]),
+    ("react-dom", "Framework UI", [
+        "__reactFiber",
+        "hydrateRoot",
+        "createPortal",
+        "flushSync",
+    ]),
+    ("next", "Framework SSR", [
+        "__NEXT_DATA__",
+        "__next_router_basePath",
+        "/_next/static/",
+        "NextRouter",
+        "__NEXT_CROSS_ORIGIN",
+    ]),
+    ("axios", "HTTP Client", [
+        "isAxiosError",
+        "AxiosError",
+        "axios.create",
+        "CancelToken",
+    ]),
+    ("lodash", "Utilidades", [
+        "_.debounce",
+        "_.throttle",
+        "_.cloneDeep",
+        "_.merge(",
+    ]),
+    ("moment", "Fechas", [
+        "moment.utc",
+        "moment.locale",
+        "_isAMomentObject",
+        "moment.isMoment",
+    ]),
+    ("date-fns", "Fechas", [
+        "dateFns",
+        "startOfWeek",
+        "endOfMonth",
+        "parseISO",
+    ]),
+    ("framer-motion", "Animaciones", [
+        "AnimatePresence",
+        "useAnimate",
+        "useMotionValue",
+        "MotionConfig",
+    ]),
+    ("@tanstack/react-query", "Data Fetching", [
+        "QueryClient",
+        "useQuery",
+        "useMutation",
+        "QueryClientProvider",
+    ]),
+    ("zustand", "State Manager", [
+        "createStore",
+        "useStore",
+        "subscribeWithSelector",
+    ]),
+    ("zod", "Validación", [
+        "ZodError",
+        "z.object",
+        "z.string",
+        "safeParse",
+    ]),
+    ("swr", "Data Fetching", [
+        "useSWR",
+        "SWRConfig",
+        "mutate(",
+    ]),
+    ("next-auth", "Autenticación", [
+        "getSession",
+        "signIn(",
+        "useSession",
+        "SessionProvider",
+    ]),
+    ("@mui/material", "UI Components", [
+        "MuiButton",
+        "makeStyles",
+        "ThemeProvider",
+        "createTheme",
+    ]),
+]
+
+
+def rs_check_technology(response, html_content: str) -> List[dict]:
+    """Detecta firmas de React/Next.js en headers y HTML."""
+    results = []
+    powered_by = response.headers.get("X-Powered-By", "")
+    if "Next.js" in powered_by:
+        results.append({"type": "info", "msg": "Tecnología detectada en cabeceras: Next.js"})
+    if 'id="__next"' in html_content:
+        results.append({"type": "info", "msg": "Estructura DOM de Next.js detectada (div id='__next')."})
+    if "data-reactroot" in html_content:
+        results.append({"type": "info", "msg": "Atributos de React detectados (data-reactroot)."})
+    if "/_next/static/" in html_content:
+        results.append({"type": "info", "msg": "Rutas de Next.js detectadas (/_next/static/)."})
+    if not results:
+        results.append({"type": "low", "msg": "No se detectaron firmas claras de React/Next.js en la página principal."})
+    return results
+
+
+def rs_extract_js_links(base_url: str, html_content: str) -> List[str]:
+    """Descubre archivos JS usando 3 estrategias: script tags, manifiestos Next.js, y referencias internas."""
+    from urllib.parse import urlparse as _urlparse, urljoin as _urljoin
+    parsed = _urlparse(base_url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    js_links: set = set()
+
+    soup = BeautifulSoup(html_content, "html.parser")
+    for script in soup.find_all("script", src=True):
+        src = script['src']
+        if src.startswith("/") or origin in src:
+            js_links.add(_urljoin(origin, src))
+
+    build_id_match = re.search(r'/_next/static/([a-zA-Z0-9_-]+)/_buildManifest\.js', html_content)
+    if not build_id_match:
+        build_id_match = re.search(r'/_next/static/([a-zA-Z0-9_-]+)/', html_content)
+    if build_id_match:
+        build_id = build_id_match.group(1)
+        manifest_url = _urljoin(origin, f"/_next/static/{build_id}/_buildManifest.js")
+        try:
+            res = requests.get(manifest_url, headers=_RS_HEADERS, timeout=_RS_TIMEOUT)
+            if res.status_code == 200:
+                for path in re.findall(r'"(/_next/static/chunks/[^"]+\.js)"', res.text):
+                    js_links.add(_urljoin(origin, path))
+        except requests.exceptions.RequestException:
+            pass
+
+    nextjs_known_chunks = [
+        "/_next/static/chunks/main.js",
+        "/_next/static/chunks/webpack.js",
+        "/_next/static/chunks/framework.js",
+        "/_next/static/chunks/pages/_app.js",
+        "/_next/static/chunks/pages/index.js",
+    ]
+    for chunk in nextjs_known_chunks:
+        full_url = _urljoin(origin, chunk)
+        try:
+            res = requests.head(full_url, headers=_RS_HEADERS, timeout=5)
+            if res.status_code == 200:
+                js_links.add(full_url)
+        except requests.exceptions.RequestException:
+            pass
+
+    discovered = list(js_links)[:10]
+    for js_url in discovered:
+        try:
+            res = requests.get(js_url, headers=_RS_HEADERS, timeout=_RS_TIMEOUT)
+            if res.status_code == 200:
+                for path in re.findall(r'"(/_next/static/[^"]+\.js)"', res.text):
+                    js_links.add(_urljoin(origin, path))
+                for path in re.findall(r'"(/static/chunks/[^"]+\.js)"', res.text):
+                    js_links.add(_urljoin(origin, "/_next" + path))
+        except requests.exceptions.RequestException:
+            continue
+
+    return list(js_links)[:_RS_MAX_JS_FILES]
+
+
+def rs_extract_nextjs_info_from_html(html_content: str) -> List[dict]:
+    """Lee el bloque __NEXT_DATA__ para obtener la versión de Next.js."""
+    libs = []
+    match = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.+?)</script>', html_content, re.DOTALL)
+    if match:
+        try:
+            data = json.loads(match.group(1))
+            version = (data.get("runtimeConfig", {}) or {}).get("NEXT_PUBLIC_VERSION", "")
+            if not version:
+                version = data.get("nextVersion", "")
+            if version:
+                libs.append({"name": "next", "version": version, "ecosystem": "npm", "source": "__NEXT_DATA__ (HTML)"})
+        except (json.JSONDecodeError, AttributeError):
+            pass
+    return libs
+
+
+def rs_extract_versions_from_cdn_urls(html_content: str) -> List[dict]:
+    """Busca versiones incrustadas en URLs de CDN (unpkg, jsdelivr, cdnjs, googleapis)."""
+    CDN_PATTERNS = [
+        (r'unpkg\.com/([@\w/-]+)@(\d+\.\d+[\.\d]*[^/"\s]*)', lambda m: (m.group(1).lstrip("@"), m.group(2))),
+        (r'jsdelivr\.net/npm/([@\w/-]+)@(\d+\.\d+[\.\d]*[^/"\s]*)', lambda m: (m.group(1), m.group(2))),
+        (r'cdnjs\.cloudflare\.com/ajax/libs/([\w.\-]+)/([\d.]+)/', lambda m: (m.group(1), m.group(2))),
+        (r'ajax\.googleapis\.com/ajax/libs/([\w.\-]+)/([\d.]+)/', lambda m: (m.group(1), m.group(2))),
+    ]
+    detected: dict = {}
+    for pattern, extractor in CDN_PATTERNS:
+        for match in re.finditer(pattern, html_content, re.IGNORECASE):
+            name, version = extractor(match)
+            name = name.rstrip(".js").rstrip(".min")
+            if name and version and name not in detected:
+                detected[name] = {"name": name, "version": version, "ecosystem": "npm",
+                                  "source": f"CDN URL en HTML ({name}@{version})"}
+    return list(detected.values())
+
+
+def rs_extract_version_from_context(content: str, lib_name: str, js_url: str):
+    """Busca la versión de una librería escaneando el contexto alrededor de su nombre."""
+    VERSION_RE = re.compile(r'(\d+\.\d+\.\d+[a-zA-Z0-9.\-+]*)')
+    search_term = f'"{lib_name}"'
+    pos = 0
+    while True:
+        idx = content.find(search_term, pos)
+        if idx == -1:
+            break
+        window = content[max(0, idx - 100): idx + 500]
+        versions = VERSION_RE.findall(window)
+        for v in versions:
+            parts = v.split(".")
+            try:
+                if all(0 <= int(p) <= 999 for p in parts[:3]):
+                    return v
+            except ValueError:
+                pass
+        pos = idx + len(search_term)
+    return None
+
+
+def rs_check_nextjs_version_endpoints(base_url: str, html_content: str) -> List[dict]:
+    """Intenta extraer la versión de Next.js desde buildManifest.js y cabeceras HTTP."""
+    from urllib.parse import urlparse as _urlparse
+    parsed = _urlparse(base_url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    libs = []
+    build_id_match = re.search(r'"buildId"\s*:\s*"([^"]+)"', html_content)
+    if not build_id_match:
+        build_id_match = re.search(r'/_next/static/([a-zA-Z0-9_-]{8,})/', html_content)
+    if build_id_match:
+        build_id = build_id_match.group(1)
+        manifest_url = f"{origin}/_next/static/{build_id}/_buildManifest.js"
+        try:
+            res = requests.get(manifest_url, headers=_RS_HEADERS, timeout=_RS_TIMEOUT)
+            if res.status_code == 200:
+                v = re.search(r'next[@/\s]v?(\d+\.\d+\.\d+)', res.text, re.IGNORECASE)
+                if v:
+                    libs.append({"name": "next", "version": v.group(1), "ecosystem": "npm", "source": manifest_url})
+        except requests.exceptions.RequestException:
+            pass
+    for u in [f"{origin}/_next/static/chunks/polyfills.js", f"{origin}/_next/static/chunks/main.js"]:
+        try:
+            res = requests.head(u, headers=_RS_HEADERS, timeout=5)
+            for hdr in [res.headers.get("X-Powered-By", ""), res.headers.get("Server", "")]:
+                v = re.search(r'[Nn]ext[./@\s]v?(\d+\.\d+\.\d+)', hdr)
+                if v:
+                    libs.append({"name": "next", "version": v.group(1), "ecosystem": "npm",
+                                 "source": f"HTTP Header ({u})"})
+                    break
+        except requests.exceptions.RequestException:
+            pass
+    return libs
+
+
+def rs_check_osv_vulnerabilities(library_name: str, version: str, ecosystem: str = "npm") -> dict:
+    """Consulta la API de OSV.dev para buscar vulnerabilidades conocidas."""
+    url = "https://api.osv.dev/v1/query"
+    payload = {"version": version, "package": {"name": library_name, "ecosystem": ecosystem}}
+    try:
+        res = requests.post(url, json=payload, timeout=_RS_TIMEOUT)
+        if res.status_code == 200:
+            data = res.json()
+            if "vulns" in data and len(data["vulns"]) > 0:
+                vulns = data["vulns"]
+                return {
+                    "vulnerable": True,
+                    "count": len(vulns),
+                    "details": [v.get("id") + " - " + v.get("summary", "Sin resumen") for v in vulns[:5]]
+                }
+        return {"vulnerable": False}
+    except Exception:
+        return {"vulnerable": False, "error": True}
+
+
+def rs_check_libraries_and_vulns(url: str, html_content: str) -> List[dict]:
+    """
+    Extrae librerías y versiones (S0-S4) y consulta OSV.dev para cada versión.
+    Retorna lista de items {"type": ..., "msg": ...} compatible con el template.
+    """
+    from urllib.parse import urlparse as _urlparse
+    detected_libs: dict = {}
+
+    # S0 — __NEXT_DATA__
+    for lib in rs_extract_nextjs_info_from_html(html_content):
+        detected_libs[lib["name"]] = lib
+
+    # S1 — CDN URLs
+    print("[ReactScan] Buscando versiones en URLs de CDN...")
+    for lib in rs_extract_versions_from_cdn_urls(html_content):
+        if lib["name"] not in detected_libs:
+            detected_libs[lib["name"]] = lib
+
+    # S2 — Next.js endpoints
+    print("[ReactScan] Consultando endpoints informativos de Next.js...")
+    for lib in rs_check_nextjs_version_endpoints(url, html_content):
+        if lib["name"] not in detected_libs:
+            detected_libs[lib["name"]] = lib
+
+    # S3 — Análisis de archivos JS
+    print("[ReactScan] Descubriendo archivos JS...")
+    js_links = rs_extract_js_links(url, html_content)
+    print(f"[ReactScan] {len(js_links)} archivos JS encontrados. Analizando...")
+
+    js_content_cache: dict = {}
+    for i, js_url in enumerate(js_links):
+        print(f"    [{i+1}/{len(js_links)}] {js_url[:80]}...", end="\r")
+        try:
+            res = requests.get(js_url, headers=_RS_HEADERS, timeout=_RS_TIMEOUT)
+            if res.status_code == 200:
+                js_content_cache[js_url] = res.text
+        except requests.exceptions.RequestException:
+            pass
+    print()
+
+    for js_url, content in js_content_cache.items():
+        for lib_name, patterns in _RS_MINIFIED_SIGNATURES:
+            for pattern in patterns:
+                match = re.search(pattern, content, re.IGNORECASE)
+                if match:
+                    version = match.group(1).strip().strip('"').strip("'")
+                    if re.match(r'^\d+\.\d+', version) and lib_name not in detected_libs:
+                        detected_libs[lib_name] = {
+                            "name": lib_name, "version": version,
+                            "ecosystem": "npm", "source": js_url
+                        }
+                    break
+
+        for lib_name, category, fingerprints in _RS_FINGERPRINTS:
+            if lib_name in detected_libs:
+                continue
+            hits = sum(1 for fp in fingerprints if fp in content)
+            if hits >= 2:
+                detected_libs[lib_name] = {
+                    "name": lib_name, "version": "desconocida",
+                    "category": category, "ecosystem": "npm",
+                    "source": js_url, "fingerprint": True
+                }
+
+    # S4 — Versión por contexto para libs sin versión
+    print("[ReactScan] Intentando determinar versiones por contexto...")
+    for name, lib in list(detected_libs.items()):
+        if lib.get("fingerprint") and lib["version"] == "desconocida":
+            for js_url, content in js_content_cache.items():
+                version = rs_extract_version_from_context(content, name, js_url)
+                if version:
+                    lib["version"] = version
+                    lib["source"] = js_url
+                    lib["fingerprint"] = False
+                    lib["ctx_search"] = True
+                    break
+
+    results: List[dict] = []
+    js_links_list_html = ""
+    if js_links:
+        items_html = "".join([f"<li><a href='{u}' target='_blank' style='color:#3498db;'>{u}</a></li>" for u in js_links])
+        js_links_list_html = (
+            f"<details><summary style='cursor:pointer;color:#4fffb0;'>Ver archivos JS analizados ({len(js_links)})</summary>"
+            f"<ul style='font-size:0.8em;'>{items_html}</ul></details>"
+        )
+
+    if not detected_libs:
+        results.append({"type": "info", "msg": f"No se encontraron versiones de librerías en el código analizado. {js_links_list_html}"})
+        return results
+
+    print(f"[ReactScan] {len(detected_libs)} librerías detectadas. Consultando OSV.dev...")
+    for name, lib in detected_libs.items():
+        version = lib["version"]
+        ecosystem = lib["ecosystem"]
+        source = lib.get("source", "")
+        category = lib.get("category", "")
+        is_fp = lib.get("fingerprint", False)
+        ctx = lib.get("ctx_search", False)
+        source_short = source.split("/")[-1] if "/" in source else source
+        source_tag = (f"<br><small style='color:#7d8fa3;'>📂 Encontrado en: "
+                      f"<a href='{source}' target='_blank' style='color:#3fa0ff;'>{source_short}</a></small>") if source else ""
+        cat_tag = f" <small style='color:#7d8fa3;'>({category})</small>" if category else ""
+
+        if is_fp:
+            msg = (f"<b>{name}</b>{cat_tag}{source_tag}"
+                   f"<br><span style='color:#ffaa00;'>⚠ Detectada por huella digital — versión no determinada.</span>"
+                   f"<br><small>Actualiza a la última versión estable como medida preventiva.</small>")
+            results.append({"type": "high", "msg": msg})
+        elif ctx:
+            msg = (f"<b>{name} ≈ {version}</b>{cat_tag}{source_tag}"
+                   f"<br><span style='color:#4fffb0;'>ℹ Versión estimada por contexto — puede ser aproximada.</span>"
+                   f"<br><small>Verifica en <a href='https://www.npmjs.com/package/{name}' target='_blank'>npmjs.com/{name}</a></small>")
+            results.append({"type": "info", "msg": msg})
+        else:
+            vuln_info = rs_check_osv_vulnerabilities(name, version, ecosystem)
+            if vuln_info.get("vulnerable"):
+                details_html = "<ul>" + "".join([
+                    "<li><a href='https://osv.dev/vulnerability/{vid}' target='_blank' style='color:#ff4d6d;'>{vd}</a></li>".format(
+                        vid=d.split(" - ")[0], vd=d)
+                    for d in vuln_info["details"]
+                ]) + "</ul>"
+                msg = (f"<b>{name} @ {version}</b>{cat_tag}{source_tag}"
+                       f"<br><span style='color:#ff4d6d;'>¡Vulnerable! {vuln_info['count']} reporte(s) OSV:</span>{details_html}")
+                results.append({"type": "critical", "msg": msg})
+            else:
+                msg = (f"<b>{name} @ {version}</b>{cat_tag}{source_tag}"
+                       f"<br>Sin vulnerabilidades conocidas en OSV.dev.")
+                results.append({"type": "success", "msg": msg})
+
+    results.append({"type": "info", "msg": js_links_list_html})
+    return results
+
+
+def rs_check_sensitive_files(url: str) -> List[dict]:
+    """Busca archivos de configuración sensibles expuestos públicamente."""
+    from urllib.parse import urljoin as _urljoin
+    sensitive_paths = ["/.env", "/package.json", "/package-lock.json",
+                       "/.next/routes-manifest.json", "/.git/config"]
+    results: List[dict] = []
+    for path in sensitive_paths:
+        target = _urljoin(url, path)
+        try:
+            res = requests.get(target, headers=_RS_HEADERS, timeout=_RS_TIMEOUT)
+            if res.status_code == 200:
+                text_preview = res.text[:50].lower()
+                if ("{" in res.text or "[core]" in res.text or "password" in res.text or "DB_" in res.text):
+                    if "<html" not in text_preview:
+                        results.append({"type": "critical",
+                                       "msg": f"Archivo sensible expuesto: <a href='{target}' target='_blank' style='color:#ff4d6d;'>{target}</a>"})
+        except requests.exceptions.RequestException:
+            pass
+    return results
+
+
+def rs_check_source_maps(url: str, html_content: str) -> List[dict]:
+    """Detecta source maps (.map) que expondrían código fuente."""
+    from urllib.parse import urljoin as _urljoin
+    soup = BeautifulSoup(html_content, "html.parser")
+    results: List[dict] = []
+    for script in soup.find_all("script", src=True):
+        src = script['src']
+        if src.startswith("/") or url in src:
+            target_script = _urljoin(url, src)
+            map_url = target_script + ".map"
+            try:
+                res = requests.get(map_url, headers=_RS_HEADERS, timeout=_RS_TIMEOUT)
+                if res.status_code == 200 and "sourcesContent" in res.text:
+                    results.append({"type": "high",
+                                   "msg": f"Source Map expuesto (código fuente): <a href='{map_url}' target='_blank' style='color:#ffaa00;'>{map_url}</a>"})
+            except requests.exceptions.RequestException:
+                continue
+    return results
+
+
+def rs_check_nextjs_cves(url: str, html_content: str) -> List[dict]:
+    """
+    Detección PASIVA de CVEs conocidos en Next.js/React.
+    Cubre: CVE-2025-29927, CVE-2025-55182, CVE-2025-55183, CVE-2025-55184.
+    """
+    from urllib.parse import urlparse as _urlparse
+    parsed = _urlparse(url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    results: List[dict] = []
+
+    is_nextjs = ("/_next/static/" in html_content or "__NEXT_DATA__" in html_content or 'id="__next"' in html_content)
+    if not is_nextjs:
+        results.append({"type": "info", "msg": "Next.js no detectado → checks de CVE específicos omitidos."})
+        return results
+
+    # CVE-2025-29927 — Middleware Auth Bypass
+    protected = ["/dashboard", "/admin", "/profile", "/account", "/settings", "/api/admin", "/api/user"]
+    bypass_header = {**_RS_HEADERS, "x-middleware-subrequest": "middleware"}
+    bypass_found = False
+    for route in protected:
+        target = origin + route
+        try:
+            r_normal = requests.get(target, headers=_RS_HEADERS, timeout=_RS_TIMEOUT, allow_redirects=False)
+            r_bypass = requests.get(target, headers=bypass_header, timeout=_RS_TIMEOUT, allow_redirects=False)
+            nc, bc = r_normal.status_code, r_bypass.status_code
+            if nc in (301, 302, 307, 401, 403) and bc == 200:
+                results.append({
+                    "type": "critical",
+                    "msg": (f"<b>CVE-2025-29927 — Middleware Auth Bypass</b> ⚠️ POSIBLEMENTE VULNERABLE<br>"
+                            f"Ruta: <code>{route}</code> | Normal: HTTP {nc} → Bypass: HTTP {bc}<br>"
+                            f"<small><a href='https://osv.dev/vulnerability/CVE-2025-29927' target='_blank'>CVE-2025-29927</a> "
+                            f"· Actualiza Next.js ≥ 12.3.5/13.5.9/14.2.25/15.2.3</small>")
+                })
+                bypass_found = True
+                break
+        except requests.exceptions.RequestException:
+            continue
+
+    if not bypass_found:
+        results.append({
+            "type": "success",
+            "msg": ("<b>CVE-2025-29927 — Middleware Auth Bypass</b><br>"
+                    "No se detectó comportamiento indicativo de bypass en rutas comunes.<br>"
+                    f"<small><a href='https://osv.dev/vulnerability/CVE-2025-29927' target='_blank'>CVE-2025-29927</a></small>")
+        })
+
+    # CVE-2025-55182 — React2Shell (RSC endpoint)
+    rsc_header = {**_RS_HEADERS,
+                  "RSC": "1",
+                  "Next-Router-State-Tree": "%5B%22%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%5D%7D%2Cnull%2Cnull%2Ctrue%5D",
+                  "Next-Router-Prefetch": "1"}
+    rsc_vulnerable = False
+    for route in ["/", "/dashboard", "/about"]:
+        target = origin + route
+        try:
+            res = requests.get(target, headers=rsc_header, timeout=_RS_TIMEOUT)
+            ct = res.headers.get("content-type", "")
+            if "text/x-component" in ct:
+                rsc_vulnerable = True
+                results.append({
+                    "type": "high",
+                    "msg": (f"<b>CVE-2025-55182 — React2Shell (RSC Flight)</b> ⚠️ ENDPOINT RSC EXPUESTO<br>"
+                            f"Ruta <code>{route}</code> responde con <code>Content-Type: text/x-component</code>.<br>"
+                            f"<small>Versiones seguras: React 19.0.1/19.1.2/19.2.1+ · Next.js 15.0.5/15.2.6+<br>"
+                            f"<a href='https://osv.dev/vulnerability/CVE-2025-55182' target='_blank'>CVE-2025-55182</a></small>")
+                })
+                break
+        except requests.exceptions.RequestException:
+            continue
+    if not rsc_vulnerable:
+        results.append({
+            "type": "success",
+            "msg": ("<b>CVE-2025-55182 — React2Shell</b><br>"
+                    "No se detectó endpoint RSC expuesto en rutas comunes.<br>"
+                    f"<small><a href='https://osv.dev/vulnerability/CVE-2025-55182' target='_blank'>CVE-2025-55182</a></small>")
+        })
+
+    # CVE-2025-55183 — Server Function Source Exposure
+    try:
+        ah = {**_RS_HEADERS, "Content-Type": "text/plain;charset=UTF-8", "Next-Action": "0" * 40}
+        res = requests.post(origin + "/", headers=ah, data="[]", timeout=_RS_TIMEOUT)
+        exposed_indicators = ["use server", "import ", "export default", "module.exports"]
+        if any(ind in res.text for ind in exposed_indicators) and res.status_code == 200:
+            results.append({
+                "type": "critical",
+                "msg": ("<b>CVE-2025-55183 — Server Function Source Code Exposure</b> ⚠️ POSIBLEMENTE VULNERABLE<br>"
+                        "El servidor devolvió código fuente en respuesta a petición de Server Action.<br>"
+                        "<small><a href='https://osv.dev/vulnerability/CVE-2025-55183' target='_blank'>CVE-2025-55183</a> · Actualiza Next.js ≥ 15.2.3</small>")
+            })
+        else:
+            results.append({
+                "type": "success",
+                "msg": ("<b>CVE-2025-55183 — Server Function Source Code Exposure</b><br>"
+                        "No se detectó exposición de código fuente en Server Actions.<br>"
+                        "<small><a href='https://osv.dev/vulnerability/CVE-2025-55183' target='_blank'>CVE-2025-55183</a></small>")
+            })
+    except requests.exceptions.RequestException:
+        results.append({"type": "low", "msg": "<b>CVE-2025-55183</b> — No se pudo conectar para comprobar Server Actions."})
+
+    # CVE-2025-55184 — App Router DoS
+    has_app_router = "/_next/static/chunks/app/" in html_content
+    if has_app_router:
+        results.append({
+            "type": "high",
+            "msg": ("<b>CVE-2025-55184 — App Router DoS (Infinite Loop)</b> ⚠️ REQUIERE VERIFICACIÓN<br>"
+                    "Se detectó el App Router activo. Si Next.js &lt; 15.2.3, podría ser vulnerable a DoS.<br>"
+                    "<small><a href='https://osv.dev/vulnerability/CVE-2025-55184' target='_blank'>CVE-2025-55184</a> · Actualiza Next.js ≥ 15.2.3</small>")
+        })
+    else:
+        results.append({
+            "type": "success",
+            "msg": ("<b>CVE-2025-55184 — App Router DoS</b><br>"
+                    "App Router no detectado — este vector probablemente no aplica.<br>"
+                    "<small><a href='https://osv.dev/vulnerability/CVE-2025-55184' target='_blank'>CVE-2025-55184</a></small>")
+        })
+
+    return results
+
+
+def rs_run_active_cve_tests(url: str, html_content: str) -> List[dict]:
+    """
+    Verificación ACTIVA de CVEs — pruebas confirmatorias más profundas.
+    Se ejecuta siempre (sin flag --test) cuando el sitio es Next.js.
+    """
+    from urllib.parse import urlparse as _urlparse
+    parsed = _urlparse(url)
+    origin = f"{parsed.scheme}://{parsed.netloc}"
+    results: List[dict] = []
+
+    is_nextjs = ("/_next/static/" in html_content or "__NEXT_DATA__" in html_content or 'id="__next"' in html_content)
+    if not is_nextjs:
+        return results
+
+    print("[ReactScan] Verificación activa de CVEs...")
+
+    # TEST 1 — CVE-2025-29927 confirmatorio (más rutas)
+    extended_routes = ["/dashboard", "/admin", "/profile", "/account",
+                       "/settings", "/api/admin", "/api/user", "/api/me",
+                       "/user", "/panel", "/private", "/secure", "/auth/session"]
+    bypass_header = {**_RS_HEADERS, "x-middleware-subrequest": "middleware"}
+    test1_result = "not_found"
+    for route in extended_routes:
+        target = origin + route
+        try:
+            r_normal = requests.get(target, headers=_RS_HEADERS, timeout=_RS_TIMEOUT, allow_redirects=False)
+            r_bypass = requests.get(target, headers=bypass_header, timeout=_RS_TIMEOUT, allow_redirects=False)
+            nc, bc = r_normal.status_code, r_bypass.status_code
+            if nc in (301, 302, 307, 401, 403) and bc == 200:
+                size_diff = abs(len(r_bypass.text) - len(r_normal.text))
+                results.append({
+                    "type": "critical",
+                    "msg": (f"<b>[ACTIVO] CVE-2025-29927 — ✅ BYPASS CONFIRMADO</b><br>"
+                            f"Ruta: <code>{route}</code> | Normal: HTTP {nc} | Bypass: HTTP {bc}<br>"
+                            f"Diferencia de contenido: {size_diff} bytes<br>"
+                            f"<small>Actualiza Next.js ≥ 12.3.5/13.5.9/14.2.25/15.2.3</small>")
+                })
+                test1_result = "vulnerable"
+                break
+        except requests.exceptions.RequestException:
+            continue
+    if test1_result == "not_found":
+        results.append({"type": "success",
+                        "msg": "<b>[ACTIVO] CVE-2025-29927</b> — Bypass no confirmado en rutas extendidas."})
+
+    # TEST 2 — CVE-2025-55182 (payload RSC benigno)
+    rsc_headers = {**_RS_HEADERS,
+                   "RSC": "1",
+                   "Next-Router-State-Tree": "%5B%22%22%2C%7B%22children%22%3A%5B%22__PAGE__%22%2C%7B%7D%5D%7D%2Cnull%2Cnull%2Ctrue%5D",
+                   "Next-Router-Prefetch": "0",
+                   "Accept": "text/x-component"}
+    rsc_confirmed = False
+    for route in ["/", "/dashboard", "/about"]:
+        try:
+            res = requests.get(origin + route, headers=rsc_headers, timeout=_RS_TIMEOUT)
+            ct = res.headers.get("content-type", "")
+            if "text/x-component" in ct:
+                body_preview = res.text[:300]
+                vuln_indicators = ["I[", "T[", "S["]
+                vuln_score = sum(1 for t in vuln_indicators if t in body_preview)
+                is_likely_vuln = vuln_score >= 2
+                results.append({
+                    "type": "critical" if is_likely_vuln else "high",
+                    "msg": (f"<b>[ACTIVO] CVE-2025-55182 — React2Shell — "
+                            f"{'ENDPOINT + PROTOCOLO RSC EXPUESTO' if is_likely_vuln else 'ENDPOINT ACTIVO'}</b><br>"
+                            f"Ruta: <code>{route}</code> | Content-Type: <code>{ct}</code><br>"
+                            f"Tokens RSC detectados: {vuln_score}/3<br>"
+                            f"<small>React ≥ 19.0.1/19.1.2/19.2.1 · Next.js ≥ 15.2.6 · "
+                            f"<a href='https://osv.dev/vulnerability/CVE-2025-55182' target='_blank'>CVE-2025-55182</a></small>")
+                })
+                rsc_confirmed = True
+                break
+        except requests.exceptions.RequestException:
+            continue
+    if not rsc_confirmed:
+        results.append({"type": "success",
+                        "msg": "<b>[ACTIVO] CVE-2025-55182</b> — Endpoint RSC no respondió con <code>text/x-component</code>."})
+
+    # TEST 3 — CVE-2025-55183 (múltiples action IDs)
+    action_ids = ["a" * 40, "0" * 40, "1" * 40, "deadbeef" + "a" * 32]
+    code_exposure_found = False
+    for action_id in action_ids:
+        try:
+            ah = {**_RS_HEADERS, "Content-Type": "text/plain;charset=UTF-8", "Next-Action": action_id}
+            res = requests.post(origin + "/", headers=ah, data="[]", timeout=_RS_TIMEOUT)
+            code_keywords = ['"use server"', "use server", "module.exports", "export default", "import React", "import {"]
+            found = [kw for kw in code_keywords if kw in res.text]
+            if found and res.status_code == 200:
+                results.append({
+                    "type": "critical",
+                    "msg": (f"<b>[ACTIVO] CVE-2025-55183 — ✅ CÓDIGO FUENTE EXPUESTO</b><br>"
+                            f"Action ID: <code>{action_id[:12]}...</code><br>"
+                            f"Palabras clave: <code>{', '.join(found)}</code><br>"
+                            f"<small><a href='https://osv.dev/vulnerability/CVE-2025-55183' target='_blank'>CVE-2025-55183</a> · Actualiza Next.js ≥ 15.2.3</small>")
+                })
+                code_exposure_found = True
+                break
+        except requests.exceptions.RequestException:
+            continue
+    if not code_exposure_found:
+        results.append({"type": "success",
+                        "msg": "<b>[ACTIVO] CVE-2025-55183</b> — Sin exposición de código fuente en Server Actions probadas."})
+
+    return results
+
+
+# =============================
 # Scanner
 # =============================
 class DarkmLens:
     """
-    DarkmLens v4.4 (Darkmoon)
+    DarkmLens v4.5 (Darkmoon)
     - Defensive passive analysis (authorized only).
     - v4.3: Threading / parallel fetch, deep-endpoints.
-    - v4.4 NEW:
-      * Directory fuzzing (--fuzz) with built-in ~200 path wordlist
-      * Directory listing detection (auto on fuzz + crawl)
-      * Google dorks generation (passive, on by default)
-      * Firebase probing: open RTDB, Firestore, Storage (--probe-firebase)
+    - v4.4: Directory fuzzing, directory listing detection, Google dorks, Firebase probing.
+    - v4.5 NEW:
+      * Smart spider: sitemap.xml / robots.txt / Next.js route-manifest seeding
+      * SPA router extraction (React Router, Vue Router, Angular Router)
+      * API call confidence scoring (0-100) on every inferred request
+      * TanStack Query / SWR / RTK Query endpoint extraction
+      * GraphQL operation name extraction (gql`...` templates)
+      * BASE_URL + relative path combination for cross-file endpoint inference
+      * Improved dedup: groups by (method, url), keeps highest-confidence finding
+      * Frontend map tree in results JSON
+      * --no-sitemap, --min-confidence CLI flags
+      * max-pages default 40, max-depth default 4
     """
 
-    VERSION = "4.4"
+    VERSION = "4.5"
 
     ABS_URL_RE = re.compile(r'https?://[^\s"\'<>]+(?:\?[^\s"\'<>]+)?', re.IGNORECASE)
 
@@ -169,23 +926,61 @@ class DarkmLens:
 
     # Firebase
     FIREBASE_HINT_RE = re.compile(r'firebaseapp\.com|firebaseio\.com|gstatic\.com/firebasejs|firebase', re.IGNORECASE)
+    # Firebase config: find any block containing apiKey (AIzaSy...) near other Firebase fields.
+    # Flexible: any order, allows nested braces, backticks, minified code.
     FIREBASE_STRICT_RE = re.compile(
-        r'({[^{}]{0,1200}'
-        r'(apiKey\s*[:=]\s*["\'][^"\']+["\'])'
-        r'[^{}]{0,1200}'
-        r'(authDomain\s*[:=]\s*["\'][^"\']+["\'])'
-        r'[^{}]{0,1200}'
-        r'(projectId\s*[:=]\s*["\'][^"\']+["\'])'
-        r'[^{}]{0,1200}'
-        r'(storageBucket|messagingSenderId|appId)'
-        r'[^{}]{0,1200}})',
-        re.IGNORECASE
+        r'(?:firebaseConfig|initializeApp|getApp|getApps)'
+        r'\s*[=(,]\s*'
+        r'(\{[^;]{0,3000}?apiKey\s*[:=]\s*["`\'][^"`\']{10,}["`\'][^;]{0,3000}?\})',
+        re.IGNORECASE | re.DOTALL
+    )
+    # Fallback: any object with apiKey that looks like a Firebase API key (AIzaSy...)
+    FIREBASE_APIKEY_RE = re.compile(
+        r'(\{[^;]{0,500}?apiKey\s*[:=]\s*["`\'](AIzaSy[A-Za-z0-9_\-]{30,})["`\'][^;]{0,2000}?\})',
+        re.IGNORECASE | re.DOTALL
     )
     FIRESTORE_REST_RE = re.compile(r'https:\/\/firestore\.googleapis\.com\/v1\/projects\/[^"\']+?\/databases\/\([^"\']+?\)\/documents\/[^"\']+', re.IGNORECASE)
     FIRESTORE_DOCS_PATH_RE = re.compile(r'\/documents\/([^?\s"\'<>#]+)', re.IGNORECASE)
     RTDB_RE = re.compile(r'https:\/\/([a-z0-9-]+)\.firebaseio\.com\/([^"\']+?)\.json', re.IGNORECASE)
     FIRESTORE_COLLECTION_CALL_RE = re.compile(r'\bcollection\s*\(\s*["\']([a-zA-Z0-9_-]{1,80})["\']\s*\)', re.IGNORECASE)
     FIRESTORE_COLLECTIONGROUP_CALL_RE = re.compile(r'\bcollectionGroup\s*\(\s*["\']([a-zA-Z0-9_-]{1,80})["\']\s*\)', re.IGNORECASE)
+
+    # ── v4.5: SPA Router route extraction ─────────────────────────────────
+    # React Router: <Route path="/dashboard" /> or { path: "/dashboard", element: ... }
+    REACT_ROUTER_JSX_RE = re.compile(r'path\s*[:=]\s*["\'](\/[^"\'\s\(\)\\]{1,200})["\']', re.IGNORECASE)
+    # Vue Router: { path: '/about', component: ... }
+    VUE_ROUTER_PATH_RE = re.compile(r'(?:^|,|\{)\s*path\s*:\s*["\'](\/[^"\'\s\\]{0,200})["\']', re.IGNORECASE | re.MULTILINE)
+    # Angular Router: { path: 'dashboard', component: ... } (relative paths)
+    ANGULAR_ROUTER_PATH_RE = re.compile(r'path\s*:\s*["\']([a-zA-Z0-9:_/-]{1,120})["\']\s*,\s*(?:component|loadChildren|redirectTo)', re.IGNORECASE)
+    # Generic SPA route object: { "/route": Component } or routes map
+    SPA_ROUTE_OBJECT_RE = re.compile(r'["\'](\/[a-zA-Z0-9/_:-]{1,120})["\']\s*:\s*(?:[a-zA-Z_$][a-zA-Z0-9_$]*|lazy\(|import\()', re.IGNORECASE)
+
+    # ── v4.5: TanStack / React Query / RTK Query ──────────────────────────
+    # useQuery / useMutation / useInfiniteQuery with URL key
+    TANSTACK_QUERY_URL_RE = re.compile(
+        r'(?:useQuery|useMutation|useInfiniteQuery|useSuspenseQuery)\s*\(\s*(?:\{[^}]{0,400}(?:queryKey|mutationKey)\s*:\s*\[[^\]]{0,200}\]|[^)]{0,300})\s*(?:queryFn|mutationFn)\s*:\s*[^,}]{0,300}fetch\s*\(\s*["\`]([^"\'\`]+)["\`]',
+        re.IGNORECASE | re.DOTALL
+    )
+    # queryFn arrow with explicit URL
+    TANSTACK_QUERYFN_RE = re.compile(
+        r'queryFn\s*:\s*(?:async\s*)?(?:\(\)\s*=>|function\s*\(\)\s*)\s*(?:await\s*)?(?:fetch|axios\.(?:get|post|put|delete|patch))\s*\(\s*["\`]([^"\'\`]+)["\`]',
+        re.IGNORECASE | re.DOTALL
+    )
+    # RTK Query: createApi baseQuery baseUrl
+    RTK_BASE_URL_RE = re.compile(r'fetchBaseQuery\s*\(\s*\{[^}]{0,200}baseUrl\s*:\s*["\`\']([^"\'\`]+)["\`\']', re.IGNORECASE | re.DOTALL)
+    # RTK builder.query / builder.mutation with url
+    RTK_ENDPOINT_RE = re.compile(r'builder\.(?:query|mutation)\s*\(\s*\{[^}]{0,400}(?:url|query)\s*:\s*(?:["\`\']([^"\'\`]+)["\`\']|\([^)]{0,80}\)\s*=>\s*[^,\n}{]{0,80}["\`\']([^"\'\`]+)["\`\'])', re.IGNORECASE | re.DOTALL)
+    # SWR: useSWR('/api/...', fetcher)
+    SWR_RE = re.compile(r'useSWR\s*\(\s*["\`\']([^"\'\`]+)["\`\']', re.IGNORECASE)
+
+    # ── v4.5: GraphQL ─────────────────────────────────────────────────────
+    # gql`query OpName { ... }` or gql`mutation OpName { ... }`
+    GQL_OPERATION_RE = re.compile(
+        r'(?:gql\s*|graphql\s*|gql\s*`|graphql\s*`)\s*[`"]\s*(query|mutation|subscription)\s+([a-zA-Z_][a-zA-Z0-9_]*)\s*(?:\([^)]{0,400}\))?\s*\{',
+        re.IGNORECASE
+    )
+    # Inline GraphQL via string query: { query: "query { ... }" }
+    GQL_INLINE_RE = re.compile(r'["\']query["\']\s*:\s*["\']\s*(query|mutation)\s+([a-zA-Z_][a-zA-Z0-9_]*)', re.IGNORECASE)
 
     # bad route filters
     BAD_ROUTE_CHARS_RE = re.compile(r'[<>"\'{}\(\)\*\$,]|\\n|\\r|\\t')
@@ -442,9 +1237,11 @@ class DarkmLens:
         authz_show_response: bool = False,
         authz_response_chars: int = 900,
 
-        # Optional AI summary (Ollama)
+        # Optional AI summary (Ollama / Claude)
         ai_ollama: bool = False,
-        ai_model: str = "llama3.1:8b",
+        ai_js_extract: bool = False,
+        ai_model: str = "dolphin-llama3:latest",
+        ai_api_key: str = "",
 
         # NEW
         deep_endpoints: bool = False,
@@ -461,12 +1258,17 @@ class DarkmLens:
         # v4.4: Firebase probing (active)
         probe_firebase: bool = False,
 
+        # v4.5: Sitemap/robots probe + confidence filtering
+        probe_sitemap: bool = True,
+        min_confidence: int = 0,
+
         # THREADS
         threads: int = 12,
         asset_threads: Optional[int] = None,
         crawl_threads: Optional[int] = None,
         authz_threads: Optional[int] = None,
         deep_threads: Optional[int] = None,
+        **kwargs
     ):
         self.target_url = target_url
         self.out_dir = out_dir
@@ -489,7 +1291,23 @@ class DarkmLens:
         self.authz_response_chars = authz_response_chars
 
         self.ai_ollama = ai_ollama
+        self.ai_provider = kwargs.get("ai_provider", "claude")
+        self.ai_js_extract = ai_js_extract
         self.ai_model = ai_model
+        self.ai_api_key = ai_api_key
+        self.lm_studio_url = kwargs.get("lm_studio_url", "")
+        self.ollama_url = kwargs.get("ollama_url", "http://localhost:11434")
+        self.claude_code_extra_prompt = kwargs.get("claude_code_extra_prompt", "")
+        self.claude_code_prompt_file = kwargs.get("claude_code_prompt_file", "")
+        self.claude_code_bin = kwargs.get("claude_code_bin", "claude")
+        self.claude_code_timeout = int(kwargs.get("claude_code_timeout", 180) or 180)
+
+        self._ai_lock = threading.Lock()
+        self._ai_js_urls_lock = threading.Lock()
+        self._ai_saved_js_lock = threading.Lock()
+        self._ai_js_urls: Set[str] = set()
+        self._ai_saved_js_hashes: Set[str] = set()
+        self._ai_saved_js_files: Dict[str, str] = {}
 
         self.deep_endpoints = deep_endpoints
         self.verbose = False  # set via CLI
@@ -500,6 +1318,10 @@ class DarkmLens:
         self.fuzz_max = fuzz_max
         self.google_dorks = google_dorks
         self.probe_firebase = probe_firebase
+
+        # v4.5 new
+        self.probe_sitemap = probe_sitemap
+        self.min_confidence = min_confidence
 
         # Thread controls
         self.threads = max(1, int(threads))
@@ -524,6 +1346,7 @@ class DarkmLens:
         self._stats_lock = threading.Lock()
         self._maps_lock = threading.Lock()
         self._screens_lock = threading.Lock()
+        self._ai_lock = threading.Lock()
 
         self._stop_event = threading.Event()
 
@@ -575,6 +1398,11 @@ class DarkmLens:
                 "base_urls": [],
                 "requests_inferred": [],
                 "probed_get": [],
+                # v4.5 new buckets
+                "tanstack_query": [],
+                "rtk_endpoints": [],
+                "graphql_operations": [],
+                "spa_routes": [],
             },
             "firebase": {
                 "detected": False,
@@ -583,6 +1411,7 @@ class DarkmLens:
                 "firestore_rest": [],
                 "rtdb": [],
                 "collections_probable": [],
+                "hints": [],
             },
             "stack_summary": {
                 "app_type": None,
@@ -638,6 +1467,7 @@ class DarkmLens:
             "google_dorks": {
                 "domain": "",
                 "queries": [],
+                "ip_blocked": False,
             },
             "firebase_probing": {
                 "enabled": probe_firebase,
@@ -653,15 +1483,30 @@ class DarkmLens:
                 "authz_routes_tested": 0,
                 "fuzz_paths_tested": 0,
                 "fuzz_found": 0,
-            }
+            },
+            "reactscan": {
+                "enabled": True,
+                "tech_results": [],
+                "libs_results": [],
+                "files_results": [],
+                "map_results": [],
+                "cve_results": [],
+                "active_cve_results": [],
+            },
+            "ai_extraction": {
+                "backend_structure": "",
+                "base_urls": [],
+                "api_calls": [],
+                "other_findings": [],
+                "credentials": [],
+                "firebase_config_reconstructed": ""
+            },
         }
 
     # -----------------------------
     # Template
     # -----------------------------
     def _ensure_template(self):
-        if os.path.exists(self.template_path):
-            return
         write_text_file(self.template_path, DEFAULT_REPORT_TEMPLATE)
 
     # -----------------------------
@@ -907,7 +1752,8 @@ class DarkmLens:
         out = {}
         for key in ["apiKey", "authDomain", "projectId", "storageBucket",
                     "messagingSenderId", "appId", "measurementId", "databaseURL"]:
-            m = re.search(rf'["\']?{key}["\']?\s*[:=]\s*["\']([^"\']+)["\']', blob, re.IGNORECASE)
+            # Handle single quotes, double quotes, and backticks
+            m = re.search(rf'["\']?{key}["\']?\s*[:=]\s*["`\']([^"`\']+)["`\']', blob, re.IGNORECASE)
             if m:
                 out[key] = m.group(1)
         return out
@@ -1037,6 +1883,10 @@ class DarkmLens:
 
             full = urljoin(base, url) if url.startswith("/") else url
             params = extract_query_params(full)
+            start_ctx = max(0, m.start() - 120)
+            end_ctx = min(len(text), m.end() + 200)
+            ctx_snippet = text[start_ctx:end_ctx]
+            confidence = self._score_api_call_probability(url, ctx_snippet + opts)
 
             self.add_finding(self.results["endpoints"]["requests_inferred"], {
                 "method": method,
@@ -1049,6 +1899,7 @@ class DarkmLens:
                 "found_in": source_name,
                 "line": ln,
                 "evidence": "fetch(...)",
+                "confidence": confidence,
             })
 
         # axios.get/post/put/delete(...)
@@ -1057,6 +1908,10 @@ class DarkmLens:
             url = m.group("url")
             ln = line_number_from_index(text, m.start())
             full = urljoin(base, url) if url.startswith("/") else url
+            start_ctx = max(0, m.start() - 80)
+            end_ctx = min(len(text), m.end() + 150)
+            ctx_snippet = text[start_ctx:end_ctx]
+            confidence = self._score_api_call_probability(url, ctx_snippet)
             self.add_finding(self.results["endpoints"]["requests_inferred"], {
                 "method": meth,
                 "url_or_path": url,
@@ -1068,6 +1923,7 @@ class DarkmLens:
                 "found_in": source_name,
                 "line": ln,
                 "evidence": f"axios.{meth.lower()}(...)",
+                "confidence": confidence,
             })
 
         # axios({ url, method, params, data, headers })
@@ -1109,6 +1965,8 @@ class DarkmLens:
             if mh:
                 headers_hint = self._compact_hint(mh.group("h"), 260)
 
+            ctx_ax = text[max(0, m.start()-100):min(len(text), m.end()+150)]
+            confidence_ax = self._score_api_call_probability(url, ctx_ax)
             self.add_finding(self.results["endpoints"]["requests_inferred"], {
                 "method": method,
                 "url_or_path": url,
@@ -1120,6 +1978,7 @@ class DarkmLens:
                 "found_in": source_name,
                 "line": ln,
                 "evidence": "axios({ ... })",
+                "confidence": confidence_ax,
             })
 
         # URLSearchParams({a:1,b:2})
@@ -1224,15 +2083,830 @@ class DarkmLens:
                         "line": ln
                     })
 
+    def _print_ai_findings_summary(self, file_label: str):
+        """Print partial summary of findings after processing each JS chunk."""
+        with self._results_lock:
+            api_calls = len(self.results.get("ai_extraction", {}).get("api_calls", []))
+            credentials = len(self.results.get("ai_extraction", {}).get("credentials", []))
+            other_findings = len(self.results.get("ai_extraction", {}).get("other_findings", []))
+            base_urls = len(self.results.get("ai_extraction", {}).get("base_urls", []))
+            endpoints_inferred = len(self.results.get("endpoints", {}).get("requests_inferred", []))
+            secrets = len(self.results.get("ai_extraction", {}).get("secrets", []))
+            
+            total = api_calls + credentials + other_findings + base_urls + endpoints_inferred + secrets
+        
+        if total > 0:
+            summary_parts = []
+            if api_calls > 0:
+                summary_parts.append(f"{Fore.GREEN}API:{api_calls}{Style.RESET_ALL}")
+            if credentials > 0:
+                summary_parts.append(f"{Fore.RED}CREDS:{credentials}{Style.RESET_ALL}")
+            if other_findings > 0:
+                summary_parts.append(f"{Fore.YELLOW}Otros:{other_findings}{Style.RESET_ALL}")
+            if base_urls > 0:
+                summary_parts.append(f"{Fore.CYAN}URLs:{base_urls}{Style.RESET_ALL}")
+            if endpoints_inferred > 0:
+                summary_parts.append(f"{Fore.CYAN}Endpoints:{endpoints_inferred}{Style.RESET_ALL}")
+            if secrets > 0:
+                summary_parts.append(f"{Fore.RED}Secrets:{secrets}{Style.RESET_ALL}")
+            
+            summary = " | ".join(summary_parts)
+            print(f"{Fore.CYAN}[AI] Hallazgos acumulados: {summary} {Fore.CYAN}[Total: {total}]{Style.RESET_ALL}")
+
+    def _analyze_js_with_ai(self, text: str, source_url: str):
+        """Usa Claude o Ollama para analizar archivos JS y extraer endpoints, keys y estructura del backend."""
+        if not text:
+            return
+
+        if getattr(self, 'ai_provider', 'claude') == 'claude' and not self.ai_api_key:
+            print(f"{Fore.YELLOW}[AI] --ai-api-key no proporcionado. Saltando análisis Claude.")
+            return
+
+        # Truncar JS a 50000 chars para no exceder el contexto (minified puede ser enorme)
+        is_ollama = getattr(self, 'ai_provider', 'claude') == 'ollama'
+        is_lm_studio = getattr(self, 'ai_provider', 'claude') == 'lm_studio'
+        # Ollama local models usually have smaller context limits than Claude. 
+        # On Virtual Machines w/o GPUs, reading large prompts takes quadratic time.
+        if is_ollama:
+            max_chars = 10000
+        elif is_lm_studio:
+            max_chars = 80000 # Send up to ~20k tokens for local models with high context limits
+        else:
+            max_chars = 50000
+            
+        file_label = source_url.split("/")[-1] or source_url
+        if is_ollama:
+            engine_str = f"Ollama ({self.ai_model})"
+        elif is_lm_studio:
+            engine_str = f"LM Studio ({self.ai_model})"
+        else:
+            engine_str = "Claude"
+
+        chunks = [text[i:i+max_chars] for i in range(0, len(text), max_chars)]
+        total_chunks = len(chunks)
+        empty_array_limit = 3
+        empty_array_hits = 0
+        accepted_chunks = 0
+
+        # Collect already-detected backend base URLs to use as context for the AI
+        known_backends: list = []
+        with self._results_lock:
+            for entry in (self.results.get("ai_extraction", {}).get("base_urls") or []):
+                u = entry.get("url") if isinstance(entry, dict) else str(entry)
+                if u and u not in known_backends:
+                    known_backends.append(u)
+            for entry in (self.results.get("endpoints", {}).get("base_urls") or []):
+                u = entry.get("url") if isinstance(entry, dict) else str(entry)
+                if u and u not in known_backends:
+                    known_backends.append(u)
+
+        known_backends_block = ""
+        if known_backends:
+            backends_list = "\n".join(f"  - {u}" for u in known_backends[:20])
+            known_backends_block = (
+                f"\nBACKENDS YA DETECTADOS (usa estos como contexto obligatorio):\n"
+                f"{backends_list}\n"
+                f"Para CADA uno de los backends listados arriba, busca en el código TODAS las llamadas HTTP que los usan "
+                f"y extrae: método (GET/POST/PUT/DELETE/PATCH), query params en la URL, campos del body (JSON/FormData), "
+                f"headers enviados, y desde qué función o componente se invoca.\n"
+            )
+
+        for c_idx, js_chunk in enumerate(chunks):
+            chunk_label = f" (Parte {c_idx+1}/{total_chunks})" if total_chunks > 1 else ""
+
+            prompt = (
+                f"Actúa como un analista rápido de JavaScript y backend exposure.\n"
+                f"Analiza solo este fragmento del archivo '{source_url}'{chunk_label}.\n"
+                f"{known_backends_block}\n"
+                f"REGLAS: usa solo datos literales del código; no inventes nada; no uses ejemplos ni placeholders; si no hay datos reales usa [] o \"\".\n"
+                f"Prioriza velocidad y precisión. Devuelve solo lo que realmente encuentres en este fragmento.\n\n"
+                f"IMPORTANTE: NO devuelvas un campo 'code'. NO resumas el archivo. SOLO devuelve el JSON del esquema pedido.\n"
+                f"Saca URLs base, llamadas HTTP reales (url/ruta, método, query params, body, headers, función/componente), credenciales reales, Firebase real, endpoints admin/GraphQL/WebSocket/servicios externos.\n"
+                f"Formato de salida: JSON válido con esta estructura:\n"
+                f"{{\n"
+                f"  \"backend_structure\": \"\",\n"
+                f"  \"base_urls\": [],\n"
+                f"  \"firebase_config_reconstructed\": \"\",\n"
+                f"  \"api_calls\": [],\n"
+                f"  \"credentials\": [],\n"
+                f"  \"other_findings\": [],\n"
+                f"  \"endpoints\": [],\n"
+                f"  \"secrets\": []\n"
+                f"}}\n\n"
+                f"CÓDIGO JAVASCRIPT:\n{js_chunk}"
+            )
+
+            try:
+                if is_lm_studio:
+                    payload = {
+                         "model": self.ai_model,
+                         "messages": [
+                             {"role": "system", "content": "You are a security analyzer. You MUST output ONLY valid JSON without Markdown blocks, no explanations, no text before or after."},
+                             {"role": "user", "content": prompt}
+                         ],
+                         "temperature": 0.1,
+                         "max_tokens": 4096,
+                         "response_format": {"type": "text"},
+                         "stream": True
+                    }
+                    base_url = getattr(self, 'lm_studio_url', "http://127.0.0.1:1234")
+                    with getattr(self, '_ai_lock', threading.Lock()):
+                        print(f"{Fore.CYAN}[AI] Analizando JS con {engine_str}: {file_label}{chunk_label} ({len(js_chunk)} enviados)")
+                        print(f"{Fore.MAGENTA}[AI] [LM Studio] Iniciando generación...{Style.RESET_ALL}")
+                        r = requests.post(f"{base_url}/v1/chat/completions", json=payload, stream=True, timeout=1200)
+                        response_text = ""
+                        if r.status_code == 200:
+                            for line in r.iter_lines():
+                                if line:
+                                    decoded_line = line.decode('utf-8', errors='ignore')
+                                    if decoded_line.startswith("data: "):
+                                        data_str = decoded_line[6:].strip()
+                                        if data_str == "[DONE]":
+                                            break
+                                        try:
+                                            chunk = json.loads(data_str)
+                                            choices = chunk.get("choices", [])
+                                            if choices and "delta" in choices[0]:
+                                                part = choices[0]["delta"].get("content", "")
+                                                response_text += part
+                                        except Exception:
+                                            pass
+                            print(f"{Fore.CYAN}[AI] [LM Studio] Respuesta recibida ({len(response_text)} chars).")
+                        else:
+                            print(f"\\n{Fore.RED}[AI] Error HTTP de LM Studio ({r.status_code}): {r.text}")
+                            continue
+                elif is_ollama:
+                    payload = {
+                        "model": self.ai_model,
+                        "prompt": prompt,
+                        "stream": True,
+                        "format": "json",
+                        "options": {
+                            "num_ctx": 4096,
+                            "temperature": 0.1,
+                            "num_predict": 2048
+                        }
+                    }
+                    
+                    with getattr(self, '_ai_lock', threading.Lock()):
+                        print(f"{Fore.CYAN}[AI] Analizando JS con {engine_str}: {file_label}{chunk_label} ({len(js_chunk)} enviados)")
+                        print(f"{Fore.MAGENTA}[AI] [Ollama] Iniciando generación...{Style.RESET_ALL}")
+                        r = requests.post(f"{self.ollama_url}/api/generate", json=payload, stream=True, timeout=1200)
+                        response_text = ""
+                        if r.status_code == 200:
+                            for line in r.iter_lines():
+                                if line:
+                                    try:
+                                        chunk = json.loads(line)
+                                        part = chunk.get("response", "")
+                                        response_text += part
+                                    except Exception:
+                                        pass
+                            print(f"{Fore.CYAN}[AI] [Ollama] Respuesta recibida ({len(response_text)} chars).")
+                        else:
+                            print(f"\\n{Fore.RED}[AI] Error HTTP de Ollama ({r.status_code}): {r.text}")
+                            continue
+                else:
+                    print(f"{Fore.CYAN}[AI] Analizando JS con {engine_str}: {file_label}{chunk_label} ({len(js_chunk)} enviados)")
+                    r = requests.post(
+                        "https://api.anthropic.com/v1/messages",
+                        headers={
+                            "x-api-key": self.ai_api_key,
+                            "anthropic-version": "2023-06-01",
+                            "content-type": "application/json",
+                        },
+                        json={
+                            "model": "claude-3-5-sonnet-20241022",
+                            "max_tokens": 4096,
+                            "messages": [{"role": "user", "content": prompt}]
+                        },
+                        timeout=90
+                    )
+
+                    if r.status_code == 200:
+                        resp = r.json()
+                        response_text = ""
+                        for block in resp.get("content", []):
+                            if block.get("type") == "text":
+                                response_text += block.get("text", "")
+                    else:
+                        try:
+                            err = r.json()
+                            print(f"{Fore.RED}[AI] Error HTTP de Claude ({r.status_code}): {err}")
+                        except Exception:
+                            print(f"{Fore.RED}[AI] Error HTTP de Claude ({r.status_code}): {r.text}")
+                        continue
+
+                # Strip possible markdown code fences and conversational boilerplate
+                response_text = self._extract_first_json_object(response_text)
+                    
+                if response_text:
+                    try:
+                        data = json.loads(response_text)
+                        if not self._is_valid_ai_extraction_schema(data):
+                            print(f"{Fore.YELLOW}[AI] Respuesta descartada por esquema inválido ({engine_str}) en {file_label}{chunk_label}.")
+                            continue
+
+                        list_fields = ("base_urls", "api_calls", "credentials", "other_findings", "endpoints", "secrets")
+                        empty_fields = [
+                            key for key in list_fields
+                            if isinstance(data.get(key), list) and len(data.get(key)) == 0
+                        ]
+                        if empty_fields:
+                            empty_array_hits += 1
+                            print(
+                                f"{Fore.YELLOW}[AI] Respuesta omitida por arrays vacíos en {file_label}{chunk_label}: "
+                                f"{', '.join(empty_fields)} ({empty_array_hits}/{empty_array_limit})."
+                            )
+                            if empty_array_hits >= empty_array_limit:
+                                print(
+                                    f"{Fore.YELLOW}[AI] Se alcanzó el límite de respuestas con arrays vacíos "
+                                    f"en {file_label}. Saltando al siguiente JS."
+                                )
+                                break
+                            continue
+
+                        accepted_chunks += 1
+                        print(f"{Fore.GREEN}[AI] Respuesta válida sin arrays vacíos en {file_label}{chunk_label}.")
+
+                        # Stamp source file for traceability
+                        for item in data.get("api_calls", []):
+                            item["source_file"] = file_label + chunk_label
+                        for item in data.get("other_findings", []):
+                            item["source_file"] = file_label + chunk_label
+                        data["_source_file"] = file_label + chunk_label
+                        
+                        self._merge_ai_extraction_payload(data, file_label + chunk_label)
+                        self._print_ai_findings_summary(file_label + chunk_label)
+                    except Exception as parse_e:
+                        print(f"{Fore.RED}[AI] Error parseando JSON de {engine_str}: {parse_e}\\nRaw output: {response_text}")
+            except Exception as api_e:
+                print(f"{Fore.YELLOW}[AI] Fallo al contactar API local/remota: {api_e}")
+
+        print(
+            f"{Fore.CYAN}[AI] Fin de {file_label}: "
+            f"válidas sin arrays vacíos={accepted_chunks}, omitidas por arrays vacíos={empty_array_hits}."
+        )
+
+    def _prepare_ai_js_workspace(self):
+        js_dir = os.path.join(self.out_dir, "ai_js_downloads")
+        if os.path.isdir(js_dir):
+            try:
+                shutil.rmtree(js_dir)
+            except Exception as e:
+                print(f"{Fore.YELLOW}[AI] No pude limpiar ai_js_downloads: {e}")
+        safe_mkdir(js_dir)
+        with self._ai_js_urls_lock:
+            self._ai_js_urls = set()
+        with self._ai_saved_js_lock:
+            self._ai_saved_js_hashes = set()
+            self._ai_saved_js_files = {}
+
+    def _queue_ai_js_url(self, url: str):
+        if not url:
+            return
+        try:
+            normalized = normalize_url(url)
+        except Exception:
+            normalized = url
+        with self._ai_js_urls_lock:
+            self._ai_js_urls.add(normalized)
+
+    def _queue_ai_js_urls_from_html(self, html: str, page_url: str, base_origin: str):
+        if not self.ai_js_extract or not html:
+            return
+        try:
+            soup = BeautifulSoup(html, "html.parser")
+        except Exception:
+            return
+
+        for s in soup.find_all("script", src=True):
+            src = (s.get("src") or "").strip()
+            if not src:
+                continue
+            u = urljoin(page_url, src)
+            if same_origin(u, base_origin):
+                self._queue_ai_js_url(u)
+
+    def _download_all_ai_js_assets(self, base_origin: str):
+        if not self.ai_js_extract:
+            return
+
+        with self._ai_js_urls_lock:
+            pending_urls = sorted(self._ai_js_urls)
+
+        if not pending_urls:
+            print(f"{Fore.YELLOW}[AI] No encontré scripts externos same-origin para descargar localmente.")
+            return
+
+        print(f"{Fore.CYAN}[AI] Descargando localmente {len(pending_urls)} JS para análisis con {self.ai_provider}...")
+
+        def worker(u: str):
+            ar = self.fetch(u)
+            if self.sleep_between:
+                time.sleep(self.sleep_between)
+            if not ar or ar.status >= 400 or not ar.text:
+                return False
+            ctype = (ar.content_type or "").lower()
+            looks_js = (
+                u.lower().endswith(".js")
+                or "javascript" in ctype
+                or "ecmascript" in ctype
+                or "module" in ctype
+            )
+            if not looks_js:
+                return False
+            self.extract_from_text(ar.text, base_origin, f"AI_ASSET: {u}", source_kind="js")
+            return True
+
+        downloaded = 0
+        with ThreadPoolExecutor(max_workers=self.asset_threads) as ex:
+            futs = [ex.submit(worker, u) for u in pending_urls]
+            for fut in as_completed(futs):
+                try:
+                    if fut.result():
+                        downloaded += 1
+                except Exception:
+                    pass
+
+        print(f"{Fore.GREEN}[AI] JS locales listos: {downloaded}/{len(pending_urls)}")
+
+    def _save_js_for_local_ai(self, text: str, source_url: str):
+        if not text:
+            return
+        js_dir = os.path.join(self.out_dir, "ai_js_downloads")
+        safe_mkdir(js_dir)
+        clean_url = source_url.split(" ")[-1] if source_url else ""
+        fname = safe_filename(clean_url.split("/")[-1] or "script.js")
+        if not fname.endswith(".js"):
+            fname += ".js"
+        fhash = sha1(text)[:10]
+        fname = f"{fname}_{fhash}.js"
+        full_path = os.path.join(js_dir, fname)
+
+        with self._ai_saved_js_lock:
+            if fhash in self._ai_saved_js_hashes:
+                return
+            self._ai_saved_js_hashes.add(fhash)
+            self._ai_saved_js_files[fhash] = fname
+
+        write_text_file(full_path, text)
+
+    def _run_post_crawl_ai_analysis(self):
+        if not self.ai_js_extract:
+            return
+            
+        provider = getattr(self, 'ai_provider', 'claude')
+        if provider == 'claude_code':
+            self._run_claude_code_analyzer()
+            return
+            
+        js_dir = os.path.join(self.out_dir, "ai_js_downloads")
+        if not os.path.exists(js_dir) or not os.listdir(js_dir):
+            print(f"{Fore.YELLOW}[AI] No se descargaron archivos JS para analizar.")
+            return
+
+        js_files = sorted([
+            name for name in os.listdir(js_dir)
+            if os.path.isfile(os.path.join(js_dir, name)) and name.lower().endswith(".js")
+        ])
+        
+        print(f"\n{Fore.CYAN}[AI] Procesando secuencialmente {len(js_files)} archivos JS descargados con {provider}...")
+        
+        for name in js_files:
+            file_path = os.path.join(js_dir, name)
+            try:
+                text = read_text_file(file_path)
+                self._analyze_js_with_ai(text, name)
+                if getattr(self, "sleep_between", 0):
+                    time.sleep(self.sleep_between)
+            except KeyboardInterrupt:
+                print(f"\n{Fore.YELLOW}[!] Archivo {name} omitido por el usuario (Ctrl+C). Pasando al siguiente...")
+                continue
+            except Exception as e:
+                print(f"{Fore.RED}[AI] Fallo procesando archivo local {name}: {e}")
+        
+        # Print summary of findings
+        with self._results_lock:
+            api_calls = len(self.results.get("ai_extraction", {}).get("api_calls", []))
+            credentials = len(self.results.get("ai_extraction", {}).get("credentials", []))
+            other_findings = len(self.results.get("ai_extraction", {}).get("other_findings", []))
+            base_urls = len(self.results.get("ai_extraction", {}).get("base_urls", []))
+            endpoints_inferred = len(self.results.get("endpoints", {}).get("requests_inferred", []))
+            secrets = len(self.results.get("ai_extraction", {}).get("secrets", []))
+            
+            total_incidents = api_calls + credentials + other_findings + base_urls + endpoints_inferred + secrets
+        
+        print(f"\n{Fore.CYAN}{'='*66}")
+        print(f"{Fore.CYAN}[AI] RESUMEN DE INCIDENCIAS ENCONTRADAS:")
+        print(f"{Fore.CYAN}{'='*66}")
+        if api_calls > 0:
+            print(f"{Fore.GREEN}  [+] Llamadas API extraídas: {api_calls}")
+        if credentials > 0:
+            print(f"{Fore.RED}  [!] Credenciales halladas: {credentials}")
+        if other_findings > 0:
+            print(f"{Fore.YELLOW}  [*] Otros hallazgos: {other_findings}")
+        if base_urls > 0:
+            print(f"{Fore.CYAN}  [*] URLs base encontradas: {base_urls}")
+        if endpoints_inferred > 0:
+            print(f"{Fore.CYAN}  [*] Endpoints inferidos: {endpoints_inferred}")
+        if secrets > 0:
+            print(f"{Fore.RED}  [!] Secretos detectados: {secrets}")
+        
+        print(f"{Fore.CYAN}{'-'*66}")
+        if total_incidents > 0:
+            print(f"{Fore.GREEN}[AI] TOTAL DE INCIDENCIAS: {total_incidents}")
+        else:
+            print(f"{Fore.YELLOW}[AI] TOTAL DE INCIDENCIAS: 0 (Sin hallazgos en el análisis de JS)")
+        print(f"{Fore.CYAN}{'='*66}\n")
+
+
+    def _read_claude_code_custom_prompt(self) -> str:
+        parts: List[str] = []
+        prompt_file = (getattr(self, "claude_code_prompt_file", "") or "").strip()
+        if prompt_file:
+            try:
+                file_text = read_text_file(prompt_file).strip()
+                if file_text:
+                    parts.append(file_text)
+            except Exception as e:
+                print(f"{Fore.YELLOW}[AI] No pude leer --claude-code-prompt-file: {e}")
+
+        extra_prompt = (getattr(self, "claude_code_extra_prompt", "") or "").strip()
+        if extra_prompt:
+            parts.append(extra_prompt)
+
+        return "\n\n".join(parts).strip()
+
+    def _build_claude_code_prompt(self, js_files: List[str]) -> str:
+        custom_prompt = self._read_claude_code_custom_prompt()
+        files_block = "\n".join(f"- {name}" for name in js_files)
+
+        # Inject already-detected backend base URLs as context
+        known_backends: list = []
+        with self._results_lock:
+            for entry in (self.results.get("ai_extraction", {}).get("base_urls") or []):
+                u = entry.get("url") if isinstance(entry, dict) else str(entry)
+                if u and u not in known_backends:
+                    known_backends.append(u)
+            for entry in (self.results.get("endpoints", {}).get("base_urls") or []):
+                u = entry.get("url") if isinstance(entry, dict) else str(entry)
+                if u and u not in known_backends:
+                    known_backends.append(u)
+
+        known_backends_block = ""
+        if known_backends:
+            backends_list = "\n".join(f"  - {u}" for u in known_backends[:20])
+            known_backends_block = (
+                f"\nBACKENDS YA DETECTADOS (contexto obligatorio):\n{backends_list}\n"
+                f"Para CADA backend listado, busca TODAS las llamadas HTTP en los archivos JS y extrae: "
+                f"método, query params, campos del body, headers y función/componente que la invoca.\n"
+            )
+
+        schema = (
+            '{\n'
+            '  "backend_structure": "",\n'
+            '  "base_urls": [],\n'
+            '  "firebase_config_reconstructed": "",\n'
+            '  "api_calls": [],\n'
+            '  "credentials": [],\n'
+            '  "other_findings": [],\n'
+            '  "endpoints": [],\n'
+            '  "secrets": []\n'
+            '}'
+        )
+        prompt_parts = [
+            "Actúa como un analista experto de ciberseguridad y reverse engineering de JavaScript frontend.",
+            "Lee TODOS los archivos .js del directorio actual antes de responder. No omitas ninguno.",
+            "Correlaciona información entre archivos para reconstruir el backend: helpers HTTP, variables compartidas, base URLs, Firebase, GraphQL, WebSockets y wrappers de API.",
+            "Si varios archivos aportan datos del mismo endpoint, consolídalos en una sola entrada.",
+            "REGLA MÁS IMPORTANTE: SOLO reporta lo que encuentres LITERALMENTE en el código fuente. "
+            "Si un campo no tiene datos reales, usa [] o \"\". "
+            "NUNCA inventes URLs, credenciales ni valores. "
+            "NUNCA uses placeholders como <YOUR_API_KEY>, example.com, api.localhost.com ni ningún valor de ejemplo. "
+            "Si no encuentras nada real, todos los arrays deben ser [] y los strings \"\".",
+            known_backends_block,
+            "La lista completa de archivos que debes revisar es:",
+            files_block,
+            "Extrae SOLO información real presente en el código:",
+            "0. URLs base del backend REALES: indica en qué constante/variable se guarda y desde qué función/componente se usa.",
+            "1. Para CADA llamada HTTP real (fetch, axios, XHR): URL exacta, método, query params reales, campos del body reales, headers reales, y función/componente que la invoca.",
+            "2. Credenciales hardcodeadas REALES: Firebase apiKey, AWS keys, JWT secrets, passwords, tokens. Valor COMPLETO literal.",
+            "3. Si hay config REAL de Firebase en el código, reconstruye el objeto con los valores REALES en 'firebase_config_reconstructed'.",
+            "4. Clasificación del backend: REST, GraphQL, Firebase, WebSocket, Next.js actions, etc.",
+            "5. Riesgos reales encontrados: auth bypass, endpoints admin, buckets, webhooks, source maps.",
+            "NO abrevies valores reales. NO recortes API keys ni tokens.",
+            "Devuelve SOLO JSON válido, sin markdown, sin comentarios y sin texto adicional.",
+            "Estructura del JSON (usa [] o \"\" para campos sin datos reales):",
+            schema,
+        ]
+        if custom_prompt:
+            prompt_parts.extend([
+                "",
+                "Instrucciones adicionales del usuario. Debes obedecerlas e integrarlas al análisis:",
+                custom_prompt,
+            ])
+        return "\n".join(prompt_parts).strip()
+
+    # URLs/values that models hallucinate when they find nothing real
+    _AI_HALLUCINATION_PATTERNS = (
+        "api.localhost.com", "api.backend.com", "api.example.com", "api.x.com",
+        "example.com", "localhost.com", "YOUR_API_KEY", "YOUR_AUTH_DOMAIN",
+        "YOUR_PROJECT_ID", "YOUR_CREDENTIALS", "YOUR_SECRET", "VALOR_COMPLETO",
+        "VALOR_ COMPLETO", "<token>", "<TOKEN>", "<YOUR_", "placeholder",
+        "test@test.com", "LoginForm.jsx", "handleSubmit()",
+    )
+
+    def _is_ai_hallucination(self, value: str) -> bool:
+        if not value or not isinstance(value, str):
+            return False
+        v = value.strip()
+        for pat in self._AI_HALLUCINATION_PATTERNS:
+            if pat.lower() in v.lower():
+                return True
+        return False
+
+    def _merge_ai_extraction_payload(self, data: dict, source_label: str):
+        if not isinstance(data, dict):
+            return
+
+        if data.get("backend_structure"):
+            if not self.results["ai_extraction"]["backend_structure"]:
+                self.results["ai_extraction"]["backend_structure"] = data["backend_structure"]
+            elif data["backend_structure"] not in self.results["ai_extraction"]["backend_structure"]:
+                self.results["ai_extraction"]["backend_structure"] += " | " + data["backend_structure"]
+
+        if isinstance(data.get("base_urls"), list):
+            for item in data["base_urls"]:
+                if not isinstance(item, dict):
+                    continue
+                if self._is_ai_hallucination(item.get("url", "")):
+                    continue
+                if not item.get("source_file"):
+                    item["source_file"] = source_label
+                self.results["ai_extraction"]["base_urls"].append(item)
+
+        if isinstance(data.get("api_calls"), list):
+            for item in data["api_calls"]:
+                if not isinstance(item, dict):
+                    continue
+                if self._is_ai_hallucination(item.get("url", "")):
+                    continue
+                if not item.get("source_file"):
+                    item["source_file"] = source_label
+                self.results["ai_extraction"]["api_calls"].append(item)
+
+        if isinstance(data.get("other_findings"), list):
+            for item in data["other_findings"]:
+                if isinstance(item, dict) and not item.get("source_file"):
+                    item["source_file"] = source_label
+            self.results["ai_extraction"]["other_findings"].extend(data["other_findings"])
+
+        for ep in (data.get("endpoints", []) or []):
+            if not isinstance(ep, str) or not ep or self._is_ai_hallucination(ep):
+                continue
+            self.add_finding(self.results["endpoints"]["requests_inferred"], {
+                "method": "UNKNOWN",
+                "url_or_path": ep,
+                "full_url": ep,
+                "params": [],
+                "body_keys": [],
+                "body_hint": None,
+                "headers_hint": None,
+                "found_in": f"[AI Infer] {source_label}",
+                "line": 0,
+                "evidence": "AI LLM",
+                "confidence": 95,
+            })
+
+        for sec in (data.get("secrets", []) or []):
+            if isinstance(sec, str) and sec and not self._is_ai_hallucination(sec):
+                self.add_finding(self.results["exposed_configs"]["other"], {
+                    "hint": sec,
+                    "found_in": f"[AI Infer] {source_label}",
+                    "line": 0
+                })
+
+        if isinstance(data.get("credentials"), list):
+            for item in data["credentials"]:
+                if not isinstance(item, dict):
+                    continue
+                if self._is_ai_hallucination(item.get("value", "") + item.get("type", "")):
+                    continue
+                if not item.get("source_file"):
+                    item["source_file"] = source_label
+                self.results["ai_extraction"]["credentials"].append(item)
+                hint = item.get("value") or item.get("description") or str(item)
+                self.add_finding(self.results["exposed_configs"]["other"], {
+                    "hint": hint,
+                    "found_in": f"[AI Cred] {source_label}",
+                    "line": 0
+                })
+
+        firebase_raw = data.get("firebase_config_reconstructed") or ""
+        if firebase_raw and isinstance(firebase_raw, str) and len(firebase_raw) > 10:
+            existing = self.results["ai_extraction"].get("firebase_config_reconstructed", "")
+            if not existing:
+                self.results["ai_extraction"]["firebase_config_reconstructed"] = firebase_raw
+            elif firebase_raw not in existing:
+                self.results["ai_extraction"]["firebase_config_reconstructed"] += "\n\n// --- " + source_label + " ---\n" + firebase_raw
+
+    def _extract_first_json_object(self, raw_text: str) -> str:
+        raw_text = (raw_text or "").strip()
+        if not raw_text:
+            return ""
+        decoder = json.JSONDecoder()
+        for i, ch in enumerate(raw_text):
+            if ch != "{":
+                continue
+            try:
+                obj, end = decoder.raw_decode(raw_text[i:])
+                if isinstance(obj, dict):
+                    return raw_text[i:i + end]
+            except Exception:
+                continue
+        return ""
+
+    def _is_valid_ai_extraction_schema(self, data: Any) -> bool:
+        """Accept only JSON payloads that look like our expected extraction schema."""
+        if not isinstance(data, dict):
+            return False
+
+        expected_keys = {
+            "backend_structure",
+            "base_urls",
+            "firebase_config_reconstructed",
+            "api_calls",
+            "credentials",
+            "other_findings",
+            "endpoints",
+            "secrets",
+        }
+
+        # Fast-reject common bad output from small models.
+        if "code" in data and not (set(data.keys()) & expected_keys):
+            return False
+
+        if not (set(data.keys()) & expected_keys):
+            return False
+
+        # Ensure collection fields are lists when present.
+        list_fields = ("base_urls", "api_calls", "credentials", "other_findings", "endpoints", "secrets")
+        for key in list_fields:
+            if key in data and not isinstance(data.get(key), list):
+                return False
+
+        return True
+
+    def _run_claude_code_analyzer(self):
+        js_dir = os.path.join(self.out_dir, "ai_js_downloads")
+        if not os.path.exists(js_dir) or not os.listdir(js_dir):
+            print(f"{Fore.YELLOW}[AI] No se descargaron archivos JS para Claude Code.")
+            return
+
+        js_files = sorted([
+            name for name in os.listdir(js_dir)
+            if os.path.isfile(os.path.join(js_dir, name)) and name.lower().endswith(".js")
+        ])
+        if not js_files:
+            print(f"{Fore.YELLOW}[AI] Claude Code no encontró archivos .js para analizar.")
+            return
+
+        claude_bin = (getattr(self, "claude_code_bin", "claude") or "claude").strip()
+        resolved_bin = shutil.which(claude_bin) or shutil.which("claude")
+        if not resolved_bin:
+            print(f"{Fore.RED}[AI] No encontré el binario de Claude Code. Instálalo o usa --claude-code-bin.")
+            return
+
+        prompt = self._build_claude_code_prompt(js_files)
+        timeout_seconds = max(30, int(getattr(self, "claude_code_timeout", 180) or 180))
+        command = [resolved_bin, "-p", prompt]
+
+        print(f"\n{Fore.CYAN}[AI] Ejecutando Claude Code sobre {len(js_files)} archivos JS descargados...")
+        print(f"{Fore.CYAN}[AI] Binario: {resolved_bin}")
+        print(f"{Fore.CYAN}[AI] Timeout: {timeout_seconds}s")
+        print(f"{Fore.CYAN}[AI] Prompt length: {len(prompt)} chars")
+
+        stdout_text = ""
+        stderr_text = ""
+        return_code = None
+
+        try:
+            import sys
+            import threading
+            
+            process = subprocess.Popen(
+                command,
+                cwd=js_dir,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                stdin=sys.stdin,
+                text=True,
+                shell=False,
+                bufsize=1,
+            )
+
+            stderr_chunks: List[str] = []
+            
+            def _drain_stderr():
+                while True:
+                    char = process.stderr.read(1)
+                    if not char:
+                        break
+                    stderr_chunks.append(char)
+                    sys.stderr.write(char)
+                    sys.stderr.flush()
+                    
+            t_err = threading.Thread(target=_drain_stderr, daemon=True)
+            t_err.start()
+
+            stdout_chunks: List[str] = []
+            sys.stdout.write(Fore.MAGENTA)
+            sys.stdout.flush()
+
+            while True:
+                char = process.stdout.read(1)
+                if not char and process.poll() is not None:
+                    break
+                if char:
+                    stdout_chunks.append(char)
+                    sys.stdout.write(char)
+                    sys.stdout.flush()
+
+            sys.stdout.write(Style.RESET_ALL)
+            sys.stdout.flush()
+            t_err.join(timeout=2.0)
+            process.wait()
+
+            return_code = process.returncode
+            stdout_text = "".join(stdout_chunks).strip()
+            stderr_text = "".join(stderr_chunks).strip()
+
+        except FileNotFoundError:
+            print(f"{Fore.RED}[AI] No se pudo ejecutar Claude Code. Binario no encontrado: {resolved_bin}")
+            return
+        except Exception as e:
+            print(f"{Fore.RED}[AI] Excepción ejecutando Claude Code: {e}")
+            return
+
+        stdout_text = (stdout_text or "").strip()
+        stderr_text = (stderr_text or "").strip()
+
+        if return_code not in (0, None):
+            print(f"\n{Fore.RED}[AI] Claude Code terminó con código {return_code}.")
+            if not stdout_text:
+                return
+
+        response_text = self._extract_first_json_object(stdout_text)
+        if not response_text and stderr_text:
+            response_text = self._extract_first_json_object(stderr_text)
+
+        if not response_text:
+            raw_path = os.path.join(self.out_dir, "claude_code_raw_output.txt")
+            try:
+                with open(raw_path, "w", encoding="utf-8", errors="ignore") as fh:
+                    fh.write("=== STDOUT ===\n")
+                    fh.write(stdout_text)
+                    fh.write("\n\n=== STDERR ===\n")
+                    fh.write(stderr_text)
+                print(f"{Fore.YELLOW}[AI] Claude Code no devolvió JSON parseable. Revisar: {raw_path}")
+            except Exception as e:
+                print(f"{Fore.YELLOW}[AI] Claude Code no devolvió JSON parseable y no pude guardar salida: {e}")
+            return
+
+        try:
+            data = json.loads(response_text)
+            self._merge_ai_extraction_payload(data, f"Claude Code ({len(js_files)} files)")
+        except Exception as parse_e:
+            raw_path = os.path.join(self.out_dir, "claude_code_invalid_json.txt")
+            try:
+                with open(raw_path, "w", encoding="utf-8", errors="ignore") as fh:
+                    fh.write(response_text)
+                print(f"{Fore.YELLOW}[AI] Guardé el JSON inválido en: {raw_path}")
+            except Exception:
+                pass
+            print(f"{Fore.RED}[AI] Error parseando JSON de Claude Code: {parse_e}")
+            return
+
     def extract_from_text(self, text: str, base: str, source_name: str, source_kind: str):
         if not text:
             return
+
+        if self.ai_js_extract and source_kind == "js":
+            self._save_js_for_local_ai(text, source_name)
 
         if source_kind in ("js", "css", "html"):
             self.infer_requests_from_text(text, base, source_name)
 
         if source_kind in ("js", "html"):
             self._extract_js_navigation_routes(text, base, source_name, source_kind)
+
+        # v4.5: New extractors
+        if source_kind == "js":
+            self._extract_spa_routes_from_js(text, base, source_name)
+            self._extract_query_library_calls(text, base, source_name)
+            self._extract_graphql_operations(text, source_name)
+            self._extract_base_url_combinations(text, base, source_name)
 
         for m in self.WS_RE.finditer(text):
             url = m.group(1)
@@ -1273,16 +2947,35 @@ class DarkmLens:
             ln = line_number_from_index(text, m.start())
             self.add_finding(self.results["endpoints"]["base_urls"], {"value": val, "found_in": source_name, "line": ln})
 
-        if self.FIREBASE_HINT_RE.search(text):
+        for m in self.FIREBASE_HINT_RE.finditer(text):
             with self._results_lock:
                 self.results["firebase"]["detected"] = True
-            for m in self.FIREBASE_STRICT_RE.finditer(text):
-                blob = m.group(1).strip()
-                ln = line_number_from_index(text, m.start())
-                self.add_finding(self.results["firebase"]["configs"], {"blob": blob, "found_in": source_name, "line": ln})
+            ln = line_number_from_index(text, m.start())
+            self.add_finding(self.results["firebase"]["hints"], {"match": m.group(0), "found_in": source_name, "line": ln})
+
+        if self.results["firebase"]["detected"]:
+            seen_blobs: set = set()
+
+            def _try_add_firebase_blob(blob: str, ln: int):
+                blob = blob.strip()
+                sig = blob[:120]
+                if sig in seen_blobs:
+                    return
+                seen_blobs.add(sig)
                 parsed = self._parse_firebase_config(blob)
+                # Only store if we got at least apiKey (real value) or authDomain
+                if not parsed.get("apiKey") and not parsed.get("authDomain"):
+                    return
+                self.add_finding(self.results["firebase"]["configs"], {"blob": blob, "found_in": source_name, "line": ln})
                 if parsed:
                     self.add_finding(self.results["firebase"]["configs_parsed"], {"fields": parsed, "found_in": source_name, "line": ln})
+
+            for m in self.FIREBASE_STRICT_RE.finditer(text):
+                _try_add_firebase_blob(m.group(1), line_number_from_index(text, m.start()))
+
+            # Fallback: any object with a real Firebase API key (AIzaSy...)
+            for m in self.FIREBASE_APIKEY_RE.finditer(text):
+                _try_add_firebase_blob(m.group(1), line_number_from_index(text, m.start()))
 
         if "collection(" in text or "collectionGroup(" in text:
             with self._results_lock:
@@ -1534,6 +3227,12 @@ class DarkmLens:
         qwork: "queue.Queue[Tuple[str,int]]" = queue.Queue()
         qwork.put((start_url, 0))
 
+        # v4.5: Seed from sitemap/robots discoveries
+        sitemap_seeds = getattr(self, '_sitemap_seeds', set())
+        for seed_url in sitemap_seeds:
+            if same_origin(seed_url, base):
+                qwork.put((seed_url, 1))  # depth 1 (already 1 hop from root)
+
         seen: Set[str] = set()
         seen_lock = threading.Lock()
 
@@ -1637,6 +3336,8 @@ class DarkmLens:
 
                     if soup is not None:
                         self.extract_routes_from_dom(soup, base, page_url=url)
+                        if self.ai_js_extract:
+                            self._queue_ai_js_urls_from_html(fr.text, url, base)
 
                         for a in soup.find_all("a", href=True):
                             href = a.get("href") or ""
@@ -1651,6 +3352,38 @@ class DarkmLens:
                             with seen_lock:
                                 if u2 not in seen and depth + 1 <= self.max_depth:
                                     qwork.put((u2, depth + 1))
+
+                        # v4.5: Follow prefetch/preload links for SPA pages
+                        for link in soup.find_all("link", href=True):
+                            rel = " ".join(link.get("rel", [])).lower()
+                            if not any(r in rel for r in ["prefetch", "preload", "canonical", "alternate"]):
+                                continue
+                            href2 = link.get("href") or ""
+                            if not href2:
+                                continue
+                            u3 = urljoin(fr.url, href2)
+                            if not same_origin(u3, base) or self.ASSET_EXT_RE.match(u3):
+                                continue
+                            path3 = urlparse(u3).path or "/"
+                            if self.looks_like_real_route(path3):
+                                u3 = normalize_url(u3)
+                                with seen_lock:
+                                    if u3 not in seen and depth + 1 <= self.max_depth:
+                                        qwork.put((u3, depth + 1))
+
+                        # v4.5: Extract canonical / og:url as route hints
+                        for meta in soup.find_all("meta"):
+                            if meta.get("property", "").lower() == "og:url":
+                                og_u = meta.get("content", "")
+                                if og_u and same_origin(og_u, base):
+                                    p_og = urlparse(og_u).path or "/"
+                                    if self.looks_like_real_route(p_og):
+                                        self.add_finding(self.results["inventory"]["routes_full_urls"], {
+                                            "path": p_og,
+                                            "full_url": normalize_url(og_u),
+                                            "found_in": f"og:url @ {url}",
+                                            "line": None,
+                                        })
 
                     self.extract_from_text(fr.text, base, f"CRAWL_HTML: {url}", source_kind="html")
 
@@ -1685,6 +3418,467 @@ class DarkmLens:
             except Exception:
                 break
 
+    # ----------------------------
+    # v4.5: Sitemap & Robots probe
+    # ----------------------------
+    def _probe_sitemap_and_robots(self, base_origin: str, crawl_queue: Optional["queue.Queue"] = None) -> set:
+        """Fetch /sitemap.xml, /sitemap_index.xml, /robots.txt and extract URLs.
+        Returns a set of discovered URLs to seed into the spider queue."""
+        if not self.probe_sitemap:
+            return set()
+
+        discovered: set = set()
+        print(f"{Fore.CYAN}[v4.5] Probando sitemap.xml y robots.txt para semillas adicionales...")
+
+        # --- robots.txt ---
+        robots_url = urljoin(base_origin, "/robots.txt")
+        fr = self.fetch(robots_url)
+        if fr and fr.status == 200 and fr.text:
+            for line in fr.text.splitlines():
+                line = line.strip()
+                if line.lower().startswith("sitemap:"):
+                    sm = line.split(":", 1)[1].strip()
+                    if sm.startswith("http"):
+                        discovered.update(self._parse_sitemap_url(sm, base_origin))
+                elif line.lower().startswith("disallow:") or line.lower().startswith("allow:"):
+                    path = line.split(":", 1)[1].strip()
+                    if path and path != "/" and not path.startswith("//*"):
+                        u = urljoin(base_origin, path.split("*")[0])
+                        if same_origin(u, base_origin) and not self.ASSET_EXT_RE.match(u):
+                            discovered.add(normalize_url(u))
+
+        # --- sitemap.xml ---
+        for sm_path in ["/sitemap.xml", "/sitemap_index.xml", "/sitemap-index.xml",
+                        "/sitemap/sitemap.xml", "/news-sitemap.xml"]:
+            sm_url = urljoin(base_origin, sm_path)
+            discovered.update(self._parse_sitemap_url(sm_url, base_origin))
+
+        # --- Next.js routes manifest ---
+        build_id = self.results.get("nextjs", {}).get("buildId")
+        if build_id:
+            for manifest_path in [
+                f"/_next/static/{build_id}/routes-manifest.json",
+                f"/_next/static/{build_id}/_buildManifest.js",
+            ]:
+                mfr = self.fetch(urljoin(base_origin, manifest_path))
+                if mfr and mfr.status == 200 and mfr.text:
+                    # Extract paths from routes-manifest.json
+                    try:
+                        mdata = json.loads(mfr.text)
+                        for section in ["dynamicRoutes", "staticRoutes", "dataRoutes"]:
+                            for entry in (mdata.get(section) or []):
+                                pg = entry.get("page") or entry.get("regex") or ""
+                                if pg.startswith("/") and "{" not in pg:
+                                    discovered.add(normalize_url(urljoin(base_origin, pg)))
+                    except Exception:
+                        # _buildManifest.js: extract page paths
+                        for m in re.finditer(r'["\'](\/[a-zA-Z0-9/_:\[\]-]{1,120})["\']', mfr.text):
+                            pg = m.group(1)
+                            if "." not in pg.split("/")[-1]:  # not a file
+                                discovered.add(normalize_url(urljoin(base_origin, pg)))
+
+        if discovered:
+            print(f"{Fore.GREEN}[v4.5] Sitemap/robots/manifests: {len(discovered)} URLs descubiertas como semillas")
+        return discovered
+
+    def _parse_sitemap_url(self, sitemap_url: str, base_origin: str) -> set:
+        """Fetch a sitemap XML and extract all <loc> URLs. Handles sitemap indexes."""
+        found: set = set()
+        try:
+            fr = self.fetch(sitemap_url)
+            if not fr or fr.status != 200 or not fr.text:
+                return found
+            text = fr.text
+            # Extract <loc> tags (works for both sitemap indexes and regular sitemaps)
+            locs = re.findall(r'<loc>\s*(https?://[^\s<]+)\s*</loc>', text, re.IGNORECASE)
+            for loc in locs:
+                loc = loc.strip()
+                if same_origin(loc, base_origin) and not self.ASSET_EXT_RE.match(loc):
+                    found.add(normalize_url(loc))
+                elif loc.endswith(".xml") and same_origin(loc, base_origin):
+                    # It's a sub-sitemap index — recurse once
+                    found.update(self._parse_sitemap_url(loc, base_origin))
+        except Exception:
+            pass
+        return found
+
+    # ----------------------------
+    # v4.5: SPA route extraction from JS
+    # ----------------------------
+    def _extract_spa_routes_from_js(self, text: str, base: str, source_name: str):
+        """Extract frontend routes declared in JS routers (React, Vue, Angular)."""
+        seen: set = set()
+        added = 0
+
+        def _add_route(raw: str, kind: str):
+            nonlocal added
+            path = self._normalize_route_to_path(raw)
+            if not path:
+                return
+            # Skip pure wildcard/param-only paths
+            if path in ("/", "/*", "/:id", "/:slug") and raw.count("/") <= 1:
+                return
+            if not self.looks_like_real_route(path):
+                if ":" in path or "[" in path:
+                    # Keep param routes but normalize them
+                    path = re.sub(r':[a-zA-Z_][a-zA-Z0-9_]*', ':param', path)
+                    path = re.sub(r'\[[^\]]+\]', '[param]', path)
+                else:
+                    return
+            if path in seen:
+                return
+            seen.add(path)
+            added += 1
+            full = urljoin(base, path)
+            self.add_finding(self.results["endpoints"]["spa_routes"], {
+                "path": path,
+                "full_url": full,
+                "router_type": kind,
+                "found_in": source_name,
+            })
+            # Also add to inventory routes
+            self.add_finding(self.results["inventory"]["routes_full_urls"], {
+                "path": path,
+                "full_url": full,
+                "found_in": f"SPA-ROUTER ({kind}): {source_name}",
+                "line": None,
+                "route_type": "frontend",
+            })
+
+        # React Router JSX / object syntax
+        for m in self.REACT_ROUTER_JSX_RE.finditer(text):
+            _add_route(m.group(1), "react-router")
+
+        # Vue Router
+        for m in self.VUE_ROUTER_PATH_RE.finditer(text):
+            _add_route(m.group(1), "vue-router")
+
+        # Angular Router
+        for m in self.ANGULAR_ROUTER_PATH_RE.finditer(text):
+            raw = m.group(1)
+            if raw:  # Angular paths are relative (no leading /)
+                _add_route("/" + raw.lstrip("/"), "angular-router")
+
+        # Generic SPA route map object
+        for m in self.SPA_ROUTE_OBJECT_RE.finditer(text):
+            _add_route(m.group(1), "spa-map")
+
+        if added and self.verbose:
+            print(f"{Fore.CYAN}[spa-routes] {added} rutas SPA extraídas de {source_name[:80]}")
+
+    # ----------------------------
+    # v4.5: API call confidence scoring
+    # ----------------------------
+    def _score_api_call_probability(self, url: str, context: str) -> int:
+        """Score 0-100: how likely is this URL actually consumed as an API call."""
+        score = 0
+        ctx = (context or "").lower()
+        url_lower = (url or "").lower()
+
+        # Strong positive signals
+        if re.search(r'\bfetch\s*\(', ctx):
+            score += 40
+        if re.search(r'\baxios\s*[.(]', ctx):
+            score += 40
+        if re.search(r'\b(usequery|usemutation|useinfinitequery|useswr|queryFn|mutationFn)\b', ctx):
+            score += 35
+        if re.search(r'\b(await|then|promise|async)\b', ctx):
+            score += 15
+        if re.search(r'(authorization|bearer|token|api.?key|x-api-key)', ctx):
+            score += 20
+        if re.search(r'\b(method\s*:|method\s*=)', ctx):
+            score += 15
+        if re.search(r'\b(headers\s*:|content.type|application/json)', ctx):
+            score += 12
+        if re.search(r'\b(body\s*:|json\.stringify|formdata)', ctx):
+            score += 12
+
+        # URL structure signals
+        if re.search(r'/(api|v\d+|graphql|rest|auth|oauth|services|endpoint)/', url_lower):
+            score += 20
+        if re.search(r'[{:][a-z_]+[}/]|\[id\]', url_lower):
+            score += 10  # has path params
+        if url_lower.startswith('http'):
+            score += 8
+        elif url_lower.startswith('/'):
+            score += 5
+
+        # Negative signals
+        if re.search(r'(?:^|\s)//.*(?:https?://|/[a-z])', ctx):
+            score -= 30  # looks like a comment
+        if re.search(r'\bconsole\.(log|error|warn|info)\b', ctx):
+            score -= 25
+        if re.search(r'\b(href|src|link|url)\s*=\s*["\']', ctx):
+            score -= 15  # href/src assignment, probably DOM
+        if re.search(r'\bdocument\.write|innerHTML\s*=|innerText\s*=', ctx):
+            score -= 20
+        if re.search(r'//\s*(https?://|example\.com|todo|fixme|note)', ctx, re.IGNORECASE):
+            score -= 30  # definitely a comment
+        if re.search(r'\.(jpg|png|gif|svg|css|html|ico)(["\'/]|$)', url_lower):
+            score -= 40  # static asset
+
+        return max(0, min(100, score))
+
+    # ----------------------------
+    # v4.5: TanStack Query / RTK Query  
+    # ----------------------------
+    def _extract_query_library_calls(self, text: str, base: str, source_name: str):
+        """Extract API calls from TanStack Query, SWR, and RTK Query patterns."""
+
+        # SWR: useSWR('/api/...', fetcher)
+        for m in self.SWR_RE.finditer(text):
+            url = m.group(1)
+            if url.startswith('/') or url.startswith('http'):
+                ln = line_number_from_index(text, m.start())
+                full = urljoin(base, url) if url.startswith('/') else url
+                start_ctx = max(0, m.start() - 100)
+                end_ctx = min(len(text), m.end() + 100)
+                ctx = text[start_ctx:end_ctx]
+                confidence = self._score_api_call_probability(url, ctx)
+                self.add_finding(self.results["endpoints"]["tanstack_query"], {
+                    "type": "swr",
+                    "method": "GET",
+                    "url_or_path": url,
+                    "full_url": full,
+                    "confidence": confidence,
+                    "found_in": source_name,
+                    "line": ln,
+                    "evidence": "useSWR(...)",
+                })
+                self.add_finding(self.results["endpoints"]["requests_inferred"], {
+                    "method": "GET",
+                    "url_or_path": url,
+                    "full_url": full,
+                    "params": extract_query_params(full),
+                    "body_keys": [],
+                    "body_hint": None,
+                    "headers_hint": None,
+                    "found_in": source_name,
+                    "line": ln,
+                    "evidence": "useSWR(...)",
+                    "confidence": confidence,
+                })
+
+        # TanStack queryFn with fetch/axios
+        for m in self.TANSTACK_QUERYFN_RE.finditer(text):
+            url = m.group(1)
+            if not url:
+                continue
+            ln = line_number_from_index(text, m.start())
+            full = urljoin(base, url) if url.startswith('/') else url
+            start_ctx = max(0, m.start() - 150)
+            end_ctx = min(len(text), m.end() + 200)
+            ctx = text[start_ctx:end_ctx]
+            # Detect method from surrounding context
+            meth = "GET"
+            if re.search(r'builder\.mutation|useMutation', ctx, re.IGNORECASE):
+                meth = "POST"
+            confidence = self._score_api_call_probability(url, ctx) + 20  # bonus for being in queryFn
+            confidence = min(100, confidence)
+            self.add_finding(self.results["endpoints"]["tanstack_query"], {
+                "type": "tanstack-queryFn",
+                "method": meth,
+                "url_or_path": url,
+                "full_url": full,
+                "confidence": confidence,
+                "found_in": source_name,
+                "line": ln,
+                "evidence": "queryFn: () => fetch/axios(...)",
+            })
+            self.add_finding(self.results["endpoints"]["requests_inferred"], {
+                "method": meth,
+                "url_or_path": url,
+                "full_url": full,
+                "params": extract_query_params(full),
+                "body_keys": [],
+                "body_hint": None,
+                "headers_hint": None,
+                "found_in": source_name,
+                "line": ln,
+                "evidence": "queryFn: () => fetch/axios(...)",
+                "confidence": confidence,
+            })
+
+        # RTK Query: baseUrl + endpoints
+        rtk_base = None
+        m_base = self.RTK_BASE_URL_RE.search(text)
+        if m_base:
+            rtk_base = m_base.group(1)
+            ln_base = line_number_from_index(text, m_base.start())
+            self.add_finding(self.results["endpoints"]["base_urls"], {
+                "value": rtk_base,
+                "found_in": f"RTK-createApi: {source_name}",
+                "line": ln_base,
+            })
+
+        for m in self.RTK_ENDPOINT_RE.finditer(text):
+            ep_path = m.group(1) or m.group(2) or ""
+            if not ep_path:
+                continue
+            ln = line_number_from_index(text, m.start())
+            meth = "POST" if "mutation" in text[max(0,m.start()-30):m.start()].lower() else "GET"
+            # Combine with RTK base if available
+            if rtk_base and not ep_path.startswith("http"):
+                full = rtk_base.rstrip("/") + "/" + ep_path.lstrip("/")
+            elif ep_path.startswith("/"):
+                full = urljoin(base, ep_path)
+            else:
+                full = ep_path
+            ctx = text[max(0, m.start()-100):min(len(text), m.end()+100)]
+            confidence = self._score_api_call_probability(ep_path, ctx) + 25  # builder.query bonus
+            confidence = min(100, confidence)
+            self.add_finding(self.results["endpoints"]["rtk_endpoints"], {
+                "method": meth,
+                "url_or_path": ep_path,
+                "full_url": full,
+                "base_url": rtk_base,
+                "confidence": confidence,
+                "found_in": source_name,
+                "line": ln,
+                "evidence": f"builder.{'mutation' if meth == 'POST' else 'query'}(...)",
+            })
+            self.add_finding(self.results["endpoints"]["requests_inferred"], {
+                "method": meth,
+                "url_or_path": ep_path,
+                "full_url": full,
+                "params": extract_query_params(full),
+                "body_keys": [],
+                "body_hint": None,
+                "headers_hint": None,
+                "found_in": source_name,
+                "line": ln,
+                "evidence": f"RTK builder.{'mutation' if meth == 'POST' else 'query'}(...)",
+                "confidence": confidence,
+            })
+
+    # ----------------------------
+    # v4.5: GraphQL operations
+    # ----------------------------
+    def _extract_graphql_operations(self, text: str, source_name: str):
+        """Extract GraphQL operation names and types from gql template literals."""
+        # gql`query/mutation OpName { ... }`
+        for m in self.GQL_OPERATION_RE.finditer(text):
+            op_type = m.group(1).lower()
+            op_name = m.group(2)
+            ln = line_number_from_index(text, m.start())
+            self.add_finding(self.results["endpoints"]["graphql_operations"], {
+                "type": op_type,
+                "name": op_name,
+                "found_in": source_name,
+                "line": ln,
+            })
+
+        # Inline { query: "query OpName ..." }
+        for m in self.GQL_INLINE_RE.finditer(text):
+            op_type = m.group(1).lower()
+            op_name = m.group(2)
+            ln = line_number_from_index(text, m.start())
+            self.add_finding(self.results["endpoints"]["graphql_operations"], {
+                "type": op_type,
+                "name": op_name,
+                "found_in": source_name,
+                "line": ln,
+            })
+
+    # ----------------------------
+    # v4.5: Base URL combinations
+    # ----------------------------
+    def _extract_base_url_combinations(self, text: str, base: str, source_name: str):
+        """When BASE_URL vars are found alongside relative paths in same JS file,
+        combine them to generate concrete absolute endpoint URLs."""
+        # Collect all BASE_URL-like variable values from this text
+        base_urls_in_file: List[str] = []
+        for m in self.BASEURL_RE.finditer(text):
+            val = m.group(2).rstrip("/")
+            if val.startswith("http") and len(val) > 8:
+                base_urls_in_file.append(val)
+
+        if not base_urls_in_file:
+            return
+
+        # Find relative API paths in the same file
+        rel_paths: set = set()
+        for m in self.REL_ENDPOINT_RE.finditer(text):
+            rel_paths.add(m.group(1))
+
+        # Also find paths next to fetch/axios calls
+        for m in self.AXIOS_SHORT_RE.finditer(text):
+            p = m.group("url")
+            if p.startswith("/"):
+                rel_paths.add(p)
+
+        for m in self.FETCH_CALL_RE.finditer(text):
+            p = m.group("url")
+            if p.startswith("/"):
+                rel_paths.add(p)
+
+        for base_url_val in base_urls_in_file:
+            for path in sorted(rel_paths)[:50]:  # cap combinatorial explosion
+                combined = base_url_val + path
+                # Sanity check: the path should look like an endpoint
+                if re.search(r'/[a-zA-Z]', path) and len(combined) < 250:
+                    self.add_finding(self.results["endpoints"]["absolute"], {
+                        "url": combined,
+                        "params": extract_query_params(combined),
+                        "found_in": f"BASE_URL+PATH_COMBO: {source_name}",
+                        "line": None,
+                        "confidence": 55,  # moderate: inferred combination
+                    })
+
+    # ----------------------------
+    # v4.5: Build frontend map tree
+    # ----------------------------
+    def _build_frontend_map(self) -> dict:
+        """Build a hierarchical map of frontend routes grouped by path segments."""
+        with self._results_lock:
+            routes = list(self.results.get("inventory", {}).get("routes_full_urls") or [])
+            authz_items = list(self.results.get("authz_audit", {}).get("items") or [])
+
+        # Build a status lookup from authz audit
+        status_lookup: dict = {}
+        for item in authz_items:
+            p = item.get("path") or "/"
+            status_lookup[p] = {
+                "status": item.get("status"),
+                "state": item.get("state"),
+                "methods": item.get("methods") or ["GET"],
+            }
+
+        tree: dict = {}
+        for route in routes:
+            path = route.get("path") or "/"
+            route_type = route.get("route_type") or self._classify_route_type(path)
+            parts = [p for p in path.strip("/").split("/") if p]
+
+            node = tree
+            for part in parts:
+                if part not in node:
+                    node[part] = {"_children": {}, "_paths": []}
+                node = node[part]["_children"]
+
+            # Leaf info
+            leaf_key = parts[-1] if parts else "[root]"
+            authz = status_lookup.get(path, {})
+            leaf_info = {
+                "path": path,
+                "route_type": route_type,
+                "found_in": route.get("found_in", ""),
+                "status": authz.get("status"),
+                "state": authz.get("state"),
+                "methods": authz.get("methods") or [],
+            }
+
+            # Store leaf info at correct level
+            parent = tree
+            for part in parts[:-1]:
+                parent = parent.get(part, {}).get("_children", {})
+            if leaf_key in parent:
+                parent[leaf_key].setdefault("_paths", []).append(leaf_info)
+            else:
+                parent[leaf_key] = {"_children": {}, "_paths": [leaf_info]}
+
+        return tree
+
     # -----------------------------
     # Main scan (root + assets) [assets threaded]
     # -----------------------------
@@ -1694,6 +3888,9 @@ class DarkmLens:
         if not fr:
             print(f"{Fore.RED}[!] No pude acceder a la URL.")
             return
+
+        # v4.5: Probe sitemap/robots early to seed the crawler
+        self._sitemap_seeds: set = set()  # will be consumed by crawl
 
         with self._results_lock:
             self.results["final_url"] = fr.url
@@ -1713,6 +3910,9 @@ class DarkmLens:
             self.results["inventory"]["internal_links"] = sorted(internal_links)
 
         self.extract_routes_from_dom(soup, base, page_url=base)
+        if self.ai_js_extract:
+            self._prepare_ai_js_workspace()
+            self._queue_ai_js_urls_from_html(fr.text, base, base)
 
         scripts = [urljoin(base, s["src"]) for s in soup.find_all("script", src=True)]
         styles = []
@@ -1774,6 +3974,9 @@ class DarkmLens:
                 if self._stop_event.is_set():
                     break
 
+        # v4.5: Probe sitemap/robots AFTER we have buildId from __NEXT_DATA__
+        self._sitemap_seeds = self._probe_sitemap_and_robots(base)
+
         # Crawl (threaded)
         self.crawl_pages_same_origin(base)
 
@@ -1798,6 +4001,10 @@ class DarkmLens:
 
         if self.probe_firebase:
             self._probe_firebase_access(base)
+
+        if self.ai_js_extract:
+            self._download_all_ai_js_assets(base)
+            self._run_post_crawl_ai_analysis()
 
         self._dedup_findings()
 
@@ -1959,7 +4166,9 @@ class DarkmLens:
 
         try:
             import subprocess
-            subprocess.run(["ollama", "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
+            my_env = os.environ.copy()
+            my_env["OLLAMA_HOST"] = getattr(self, "ollama_url", "http://localhost:11434")
+            subprocess.run(["ollama", "--version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, env=my_env)
         except Exception:
             return heuristic + " | (ollama no disponible)"
 
@@ -1980,12 +4189,15 @@ class DarkmLens:
 
         try:
             import subprocess
+            my_env = os.environ.copy()
+            my_env["OLLAMA_HOST"] = getattr(self, "ollama_url", "http://localhost:11434")
             cp = subprocess.run(
                 ["ollama", "run", self.ai_model],
                 input=prompt.encode("utf-8", errors="ignore"),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 timeout=12,
+                env=my_env
             )
             out = (cp.stdout.decode("utf-8", errors="ignore") or "").strip()
             if not out:
@@ -2215,22 +4427,92 @@ class DarkmLens:
         except Exception:
             return
 
-        print(f"{Fore.CYAN}[*] Generando Google dorks para {domain}...")
+        print(f"{Fore.CYAN}[*] Ejecutando Google dorks para {domain} de forma automatizada (podría demorar)...")
 
         queries = []
+        consecutive_blocks = 0
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9,es;q=0.8",
+        }
+        cookies = {
+            "CONSENT": "YES+cb.20230101-14-p0.es+FX+999"  # Bypass cookie consent screen
+        }
+        
         for tmpl in self.GOOGLE_DORK_TEMPLATES:
             dork = tmpl["tpl"].replace("{domain}", domain)
             google_url = f"https://www.google.com/search?q={requests.utils.quote(dork)}"
+            
+            found = None
+            try:
+                # Retardo para evitar baneos de Google
+                time.sleep(2.0)
+                res = requests.get(google_url, headers=headers, cookies=cookies, timeout=10)
+                
+                if res.status_code == 200:
+                    html_lower = res.text.lower()
+                    
+                    # 1. Comprobar si caímos en la página de consentimiento o en un soft-ban (ej. CAPTCHA con 200 OK)
+                    if "consent.google.com" in html_lower or \
+                       "antes de ir a google" in html_lower or \
+                       "before you continue" in html_lower or \
+                       'id="captcha"' in html_lower or \
+                       "recaptcha" in html_lower:
+                        found = "blocked"  # Captcha / soft-ban
+                    
+                    # 2. Comprobar si no hay resultados
+                    elif "did not match any documents" in html_lower or \
+                         "no se han encontrado resultados" in html_lower or \
+                         "no documents match" in html_lower or \
+                         "no results found" in html_lower or \
+                         "no match for" in html_lower or \
+                         "no produjo ningún documento" in html_lower:
+                        found = False
+                        
+                    # 3. Solo si pasó lo anterior, asumimos que encontró algo útil
+                    else:
+                        found = True
+                        
+                elif res.status_code == 429:
+                    print(f"{Fore.YELLOW}[!] Google devolvió 429 (Too Many Requests). IP bloqueada temporalmente.")
+                    found = "blocked"
+                else:
+                    found = None
+            except Exception:
+                found = None
+
+            if found == "blocked":
+                consecutive_blocks += 1
+            else:
+                consecutive_blocks = 0
+
             queries.append({
                 "category": tmpl["cat"],
                 "dork": dork,
                 "description": tmpl["desc"],
                 "google_url": google_url,
+                "found": found
             })
+
+            if consecutive_blocks >= 3:
+                print(f"{Fore.RED}[!] 3 bloqueos consecutivos de Google — deteniendo búsqueda de dorks. Solo se mostrarán URLs en el reporte.")
+                # Mark remaining as blocked-skipped
+                for remaining_tmpl in self.GOOGLE_DORK_TEMPLATES[len(queries):]:
+                    remaining_dork = remaining_tmpl["tpl"].replace("{domain}", domain)
+                    remaining_url = f"https://www.google.com/search?q={requests.utils.quote(remaining_dork)}"
+                    queries.append({
+                        "category": remaining_tmpl["cat"],
+                        "dork": remaining_dork,
+                        "description": remaining_tmpl["desc"],
+                        "google_url": remaining_url,
+                        "found": "skipped"
+                    })
+                break
 
         with self._results_lock:
             self.results["google_dorks"]["domain"] = domain
             self.results["google_dorks"]["queries"] = queries
+            self.results["google_dorks"]["ip_blocked"] = consecutive_blocks >= 3
 
         print(f"{Fore.GREEN}[+] {len(queries)} Google dorks generados para {domain}")
 
@@ -2530,7 +4812,33 @@ class DarkmLens:
             ep["graphql"] = dedup_list_of_dict(ep["graphql"], ["url_or_path", "found_in", "line"])
             ep["websocket"] = dedup_list_of_dict(ep["websocket"], ["url", "found_in", "line"])
             ep["base_urls"] = dedup_list_of_dict(ep["base_urls"], ["value", "found_in", "line"])
-            ep["requests_inferred"] = dedup_list_of_dict(ep["requests_inferred"], ["method", "full_url", "found_in", "line"])
+            # v4.5: Improved dedup for requests_inferred: group by (method, url) keeping best confidence
+            _ri_seen: dict = {}  # key -> index in out
+            _ri_out: List[dict] = []
+            for item in ep["requests_inferred"]:
+                k = (item.get("method", "?"), item.get("url_or_path", ""))
+                conf = item.get("confidence", 0) or 0
+                if k not in _ri_seen:
+                    _ri_seen[k] = len(_ri_out)
+                    _ri_out.append(dict(item))
+                else:
+                    existing = _ri_out[_ri_seen[k]]
+                    existing_conf = existing.get("confidence", 0) or 0
+                    if conf > existing_conf:
+                        # Keep item with higher confidence but append the found_in info
+                        item_copy = dict(item)
+                        prev_src = existing.get("found_in", "")
+                        item_copy["found_in"] = item_copy.get("found_in", "")
+                        _ri_out[_ri_seen[k]] = item_copy
+            # Apply min_confidence filter if set
+            if self.min_confidence > 0:
+                _ri_out = [x for x in _ri_out if (x.get("confidence") or 0) >= self.min_confidence]
+            ep["requests_inferred"] = _ri_out
+            # Also dedup tanstack, rtk, graphql
+            ep["tanstack_query"] = dedup_list_of_dict(ep.get("tanstack_query", []), ["type", "url_or_path", "found_in"])
+            ep["rtk_endpoints"] = dedup_list_of_dict(ep.get("rtk_endpoints", []), ["method", "url_or_path", "found_in"])
+            ep["graphql_operations"] = dedup_list_of_dict(ep.get("graphql_operations", []), ["type", "name", "found_in"])
+            ep["spa_routes"] = dedup_list_of_dict(ep.get("spa_routes", []), ["path", "router_type"])
 
             inv = self.results["inventory"]
             inv["routes_full_urls"] = dedup_list_of_dict(inv["routes_full_urls"], ["full_url", "path"])
@@ -2594,6 +4902,11 @@ class DarkmLens:
         # Build app stack summary
         self._identify_app_stack()
 
+        # v4.5: Build frontend map
+        frontend_map = self._build_frontend_map()
+        with self._results_lock:
+            self.results["frontend_map"] = frontend_map
+
     # -----------------------------
     # HTML Report rendering
     # -----------------------------
@@ -2615,12 +4928,62 @@ class DarkmLens:
         print(f"{Fore.GREEN}[+] Template (editable): {self.template_path}")
 
     # -----------------------------
+    # ReactScan
+    # -----------------------------
+    def _run_reactscan(self):
+        """Ejecuta el módulo ReactScan: detección de librerías, CVEs activos (sin flag --test)."""
+        url = self.results.get("final_url") or self.target_url
+        print(f"{Fore.CYAN}[ReactScan] Iniciando análisis de seguridad React/Next.js en: {url}")
+
+        try:
+            sess = self._get_session()
+            resp = sess.get(url, timeout=self.request_timeout, verify=False)
+            html = resp.text or ""
+        except Exception as e:
+            with self._results_lock:
+                self.results["notes"].append(f"ReactScan fetch error: {e}")
+            return
+
+        with self._results_lock:
+            self.results["reactscan"]["tech_results"] = rs_check_technology(resp, html)
+
+        print(f"{Fore.CYAN}[ReactScan] Escaneando librerías y vulnerabilidades OSV.dev...")
+        libs = rs_check_libraries_and_vulns(url, html)
+        with self._results_lock:
+            self.results["reactscan"]["libs_results"] = libs
+
+        print(f"{Fore.CYAN}[ReactScan] Buscando archivos sensibles...")
+        files = rs_check_sensitive_files(url)
+        with self._results_lock:
+            self.results["reactscan"]["files_results"] = files
+
+        print(f"{Fore.CYAN}[ReactScan] Buscando Source Maps...")
+        maps = rs_check_source_maps(url, html)
+        with self._results_lock:
+            self.results["reactscan"]["map_results"] = maps
+
+        print(f"{Fore.CYAN}[ReactScan] Comprobando CVEs Next.js/React (pasivo)...")
+        cves = rs_check_nextjs_cves(url, html)
+        with self._results_lock:
+            self.results["reactscan"]["cve_results"] = cves
+
+        print(f"{Fore.CYAN}[ReactScan] Verificación activa de CVEs (sin --test requerido)...")
+        active = rs_run_active_cve_tests(url, html)
+        with self._results_lock:
+            self.results["reactscan"]["active_cve_results"] = active
+
+        total_critical = sum(1 for r in (libs + files + maps + cves + active) if r.get("type") == "critical")
+        total_high = sum(1 for r in (libs + files + maps + cves + active) if r.get("type") == "high")
+        print(f"{Fore.RED if total_critical else Fore.YELLOW}[ReactScan] Completado — critical: {total_critical}, high: {total_high}")
+
+    # -----------------------------
     # Run
     # -----------------------------
     def run(self):
         self.print_banner()
         self.identify_tech_wappalyzer()
         self.scan_source_and_assets()
+        self._run_reactscan()
         self.generate_report()
         print(f"\n{Fore.MAGENTA}Darkmoon • Security Reporting")
 
@@ -2658,10 +5021,292 @@ def parse_headers(args: argparse.Namespace) -> Dict[str, str]:
     return headers
 
 
+def _ai_prefs_path() -> str:
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(script_dir, ".darkmlens_ai_prefs.json")
+
+
+def _load_ai_prefs() -> Dict[str, str]:
+    path = _ai_prefs_path()
+    if not os.path.isfile(path):
+        return {}
+    try:
+        data = json.loads(read_text_file(path))
+        if isinstance(data, dict):
+            return data
+    except Exception:
+        pass
+    return {}
+
+
+def _save_ai_prefs(provider: str, model: str, ollama_url: str = "", lm_studio_url: str = ""):
+    payload = {
+        "ai_provider": provider or "",
+        "ai_model": model or "",
+        "ollama_url": ollama_url or "",
+        "lm_studio_url": lm_studio_url or "",
+        "updated_at": int(time.time()),
+    }
+    try:
+        write_text_file(_ai_prefs_path(), json.dumps(payload, ensure_ascii=False, indent=2))
+    except Exception:
+        pass
+
+
+def _reset_ai_prefs() -> bool:
+    path = _ai_prefs_path()
+    try:
+        if os.path.isfile(path):
+            os.remove(path)
+        return True
+    except Exception:
+        return False
+
+
+def apply_saved_ai_defaults(args):
+    """Carga defaults AI guardados cuando el usuario no los pasó explícitamente."""
+    if not getattr(args, "ai_js_extract", False):
+        return
+
+    prefs = _load_ai_prefs()
+    if not prefs:
+        return
+
+    saved_provider = (prefs.get("ai_provider") or "").strip()
+    saved_model = (prefs.get("ai_model") or "").strip()
+    saved_ollama = (prefs.get("ollama_url") or "").strip()
+    saved_lm = (prefs.get("lm_studio_url") or "").strip()
+
+    if not getattr(args, "ai_provider", None) and saved_provider:
+        args.ai_provider = saved_provider
+
+    if getattr(args, "ai_model", "") == "dolphin-llama3:latest" and saved_model:
+        args.ai_model = saved_model
+
+    if getattr(args, "ai_provider", "") == "ollama" and getattr(args, "ollama_url", "") == "http://localhost:11434" and saved_ollama:
+        args.ollama_url = saved_ollama
+
+    if getattr(args, "ai_provider", "") == "lm_studio" and saved_lm:
+        setattr(args, "lm_studio_url", saved_lm)
+
+
+def interactive_ai_setup(args):
+    import sys
+    if not args.ai_js_extract or getattr(args, "ai_provider", None):
+        if not getattr(args, "ai_provider", None):
+            args.ai_provider = "claude"
+        return
+
+    if not sys.stdout.isatty():
+        args.ai_provider = "claude"
+        return
+
+    prefs = _load_ai_prefs()
+    saved_provider = (prefs.get("ai_provider") or "").strip()
+    saved_model = (prefs.get("ai_model") or "").strip()
+    saved_ollama = (prefs.get("ollama_url") or "").strip()
+    saved_lm = (prefs.get("lm_studio_url") or "").strip()
+
+    default_choice = "1"
+    if saved_provider == "ollama":
+        default_choice = "2"
+    elif saved_provider == "lm_studio":
+        default_choice = "3"
+    elif saved_provider == "claude_code":
+        default_choice = "4"
+
+    print(f"\n{Fore.CYAN}[AI] Análisis Inteligente JS habilitado.")
+    if saved_provider:
+        print(f"{Fore.GREEN}[*] Config guardada: provider={saved_provider} model={saved_model or '-'}")
+        if saved_provider == "ollama" and saved_ollama:
+            print(f"{Fore.GREEN}[*] Ollama URL guardada: {saved_ollama}")
+        if saved_provider == "lm_studio" and saved_lm:
+            print(f"{Fore.GREEN}[*] LM Studio URL guardada: {saved_lm}")
+    print("¿Qué motor deseas utilizar para extraer las rutas JS?")
+    print(f"  {Fore.YELLOW}1){Style.RESET_ALL} Claude (Requiere API Key)")
+    print(f"  {Fore.YELLOW}2){Style.RESET_ALL} Ollama (Local)")
+    print(f"  {Fore.YELLOW}3){Style.RESET_ALL} LM Studio (Local o Remoto)")
+    print(f"  {Fore.YELLOW}4){Style.RESET_ALL} Claude Code (Local CLI sobre todos los JS descargados)")
+    
+    choice = input(f"Elige una opción [1/2/3/4] (por defecto {default_choice}): ").strip()
+    if not choice:
+        choice = default_choice
+    
+    if choice == "3":
+        args.ai_provider = "lm_studio"
+        lm_default = saved_lm or "127.0.0.1:1234"
+        lm_ip = input(f"Ingresa IP y Puerto de LM Studio (ej. 127.0.0.1:1234) [Enter={lm_default}]: ").strip()
+        if not lm_ip:
+            lm_ip = lm_default
+        if not lm_ip.startswith("http"):
+            lm_ip = f"http://{lm_ip}"
+        setattr(args, "lm_studio_url", lm_ip)
+        
+        try:
+            r = requests.get(f"{lm_ip}/v1/models", timeout=5)
+            if r.status_code == 200:
+                models_data = r.json().get("data", [])
+                if not models_data:
+                    print(f"{Fore.RED}[!] LM Studio está funcionando pero sin modelos cargados.")
+                    args.ai_model = "local-model"
+                else:
+                    print(f"\n{Fore.GREEN}[+] LM Studio detectado en {lm_ip}")
+                    valid_models = [m.get("id") for m in models_data if m.get("id")]
+                    for i, mname in enumerate(valid_models):
+                        print(f"  {Fore.YELLOW}{i+1}){Style.RESET_ALL} {mname}")
+                    remembered_model = saved_model if saved_model in valid_models else ""
+                    prompt_model = f"Selecciona el modelo [1-{len(valid_models)}]"
+                    if remembered_model:
+                        prompt_model += f" [Enter={remembered_model}]"
+                    prompt_model += ": "
+                    m_choice = input(prompt_model).strip()
+                    if not m_choice and remembered_model:
+                        args.ai_model = remembered_model
+                    else:
+                        try:
+                            idx = int(m_choice) - 1
+                            if 0 <= idx < len(valid_models):
+                                args.ai_model = valid_models[idx]
+                            else:
+                                print(f"{Fore.YELLOW}[!] Opción inválida. Usando {valid_models[0]}.")
+                                args.ai_model = valid_models[0]
+                        except ValueError:
+                            print(f"{Fore.YELLOW}[!] Usando {valid_models[0]} por defecto.")
+                            args.ai_model = valid_models[0]
+                print(f"{Fore.GREEN}[*] Proveedor AI: LM Studio | Modelo: {args.ai_model}")
+                _save_ai_prefs("lm_studio", args.ai_model, lm_studio_url=lm_ip)
+            else:
+                print(f"{Fore.RED}[!] Error HTTP {r.status_code} conectando a LM Studio.")
+                args.ai_model = "local-model"
+                _save_ai_prefs("lm_studio", args.ai_model, lm_studio_url=lm_ip)
+        except Exception:
+            print(f"{Fore.RED}[!] No se pudo conectar a LM Studio en {lm_ip}")
+            print(f"{Fore.YELLOW}[!] Usando modelo por defecto.")
+            args.ai_model = "local-model"
+            _save_ai_prefs("lm_studio", args.ai_model, lm_studio_url=lm_ip)
+    elif choice == "2":
+        args.ai_provider = "ollama"
+        ollama_default = saved_ollama or "localhost:11434"
+        ollama_ip = input(f"Ingresa URL de Ollama (ej. localhost:11434) [Enter={ollama_default}]: ").strip()
+        if not ollama_ip:
+            ollama_ip = ollama_default
+        if not ollama_ip.startswith("http"):
+            ollama_ip = f"http://{ollama_ip}"
+        setattr(args, "ollama_url", ollama_ip)
+        try:
+            r = requests.get(f"{ollama_ip}/api/tags", timeout=3)
+            if r.status_code == 200:
+                models = r.json().get("models", [])
+                if not models:
+                    print(f"{Fore.RED}[!] Ollama está corriendo pero no tienes modelos instalados.")
+                    args.ai_model = "dolphin-llama3:latest" # default fallback
+                else:
+                    print(f"\n{Fore.GREEN}[+] Ollama detectado en {ollama_ip}")
+                    valid_models = [m.get('name') for m in models if m.get('name')]
+                    for i, mname in enumerate(valid_models):
+                        print(f"  {Fore.YELLOW}{i+1}){Style.RESET_ALL} {mname}")
+                    remembered_model = saved_model if saved_model in valid_models else ""
+                    prompt_model = f"Selecciona el modelo [1-{len(valid_models)}]"
+                    if remembered_model:
+                        prompt_model += f" [Enter={remembered_model}]"
+                    prompt_model += ": "
+                    m_choice = input(prompt_model).strip()
+                    if not m_choice and remembered_model:
+                        args.ai_model = remembered_model
+                    else:
+                        try:
+                            idx = int(m_choice) - 1
+                            if 0 <= idx < len(valid_models):
+                                args.ai_model = valid_models[idx]
+                            else:
+                                print(f"{Fore.YELLOW}[!] Opción inválida. Usando {valid_models[0]} por defecto.")
+                                args.ai_model = valid_models[0]
+                        except ValueError:
+                            print(f"{Fore.YELLOW}[!] Usando {valid_models[0]} por defecto.")
+                            args.ai_model = valid_models[0]
+                    
+                print(f"{Fore.GREEN}[*] Proveedor AI: Ollama | Modelo: {args.ai_model}")
+                _save_ai_prefs("ollama", args.ai_model, ollama_url=ollama_ip)
+            else:
+                print(f"{Fore.RED}[!] Error HTTP {r.status_code} al conectar a Ollama.")
+                _save_ai_prefs("ollama", args.ai_model, ollama_url=ollama_ip)
+        except Exception:
+            print(f"{Fore.RED}[!] No se pudo conectar a Ollama. Asegúrate de ejecutar 'ollama serve' en otra terminal.")
+            print(f"{Fore.YELLOW}[!] Se intentará ejecutar Ollama a ciegas con modelo por defecto.")
+            args.ai_model = "dolphin-llama3:latest"
+            _save_ai_prefs("ollama", args.ai_model, ollama_url=ollama_ip)
+    elif choice == "4":
+        args.ai_provider = "claude_code"
+        _save_ai_prefs("claude_code", args.ai_model)
+        print(f"{Fore.GREEN}[*] Proveedor AI: Claude Code (Local CLI)")
+    else:
+        args.ai_provider = "claude"
+        if not args.ai_api_key:
+            key = input(f"Ingresa tu API Key de Claude: ").strip()
+            args.ai_api_key = key
+        _save_ai_prefs("claude", args.ai_model)
+        print(f"{Fore.GREEN}[*] Proveedor AI: Claude")
+
+def _cmd_report_from_json(json_path: str, template_path: str = None):
+    """Regenera el HTML desde un results.json existente sin re-escanear."""
+    import os, json
+    json_path = os.path.abspath(json_path)
+    if not os.path.isfile(json_path):
+        print(f"{Fore.RED}[!] No se encontró: {json_path}")
+        return 1
+    out_dir = os.path.dirname(json_path)
+    with open(json_path, "r", encoding="utf-8") as f:
+        results = json.load(f)
+
+    # Resolve template — try several candidate locations
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = []
+    if template_path:
+        candidates.append(template_path)
+    candidates += [
+        os.path.join(out_dir, "report.template.html"),
+        os.path.join(out_dir, "template.html"),
+        os.path.join(script_dir, "template.html"),
+        os.path.join(script_dir, "templates", "default.template.html"),
+        os.path.join(script_dir, "templates", "template.html"),
+    ]
+    template_path = None
+    template = None
+    for candidate in candidates:
+        if not os.path.isfile(candidate):
+            continue
+        try:
+            candidate_text = read_text_file(candidate)
+        except Exception:
+            continue
+        if "__RESULTS_JSON__" in candidate_text:
+            template_path = candidate
+            template = candidate_text
+            break
+
+    if template is None:
+        template_path = "<embedded DEFAULT_REPORT_TEMPLATE>"
+        template = DEFAULT_REPORT_TEMPLATE
+
+    payload = json.dumps(results, ensure_ascii=False)
+    html = template.replace("__RESULTS_JSON__", payload)
+    out_html = os.path.join(out_dir, "index.html")
+    with open(out_html, "w", encoding="utf-8") as f:
+        f.write(html)
+    print(f"{Fore.GREEN}[+] HTML regenerado: {out_html}")
+    return 0
+
+
 def main():
     p = argparse.ArgumentParser(description="DarkmLens v4.4 (Darkmoon) - Passive exposure report + active recon (authorized only)")
-    p.add_argument("url", help="Target URL (https://example.com/path)")
+    p.add_argument("url", nargs="?", default=None, help="Target URL (https://example.com/path)")
     p.add_argument("--out", default="out", help="Output folder")
+    p.add_argument("--report-from-json", metavar="PATH", default=None,
+                   help="Regenera el HTML desde un results.json existente sin re-escanear. Ej: --report-from-json out/site/results.json")
+    p.add_argument("--template", metavar="PATH", default=None,
+                   help="Ruta al template HTML (usado con --report-from-json si no hay template.html en la misma carpeta)")
+    p.add_argument("--reset-ai-prefs", action="store_true",
+                   help="Borra preferencias AI guardadas (provider/model/IP) y sale")
     p.add_argument("--max-assets", type=int, default=120, help="Max same-origin assets to fetch")
     p.add_argument("--max-maps", type=int, default=20, help="Max sourcemaps to fetch")
     p.add_argument("--timeout", type=int, default=15, help="Request timeout seconds")
@@ -2669,8 +5314,12 @@ def main():
     p.add_argument("--no-screenshot", action="store_true", help="Disable screenshots (Playwright)")
 
     p.add_argument("--no-crawl", action="store_true", help="Disable same-origin crawling of pages")
-    p.add_argument("--max-pages", type=int, default=25, help="Max pages to visit (crawl)")
-    p.add_argument("--max-depth", type=int, default=2, help="Max crawl depth")
+    p.add_argument("--max-pages", type=int, default=40, help="Max pages to visit (crawl)")
+    p.add_argument("--max-depth", type=int, default=4, help="Max crawl depth")
+
+    # v4.5: Sitemap + confidence
+    p.add_argument("--no-sitemap", action="store_true", help="Skip sitemap.xml / robots.txt seed probe")
+    p.add_argument("--min-confidence", type=int, default=0, help="Filter requests_inferred to entries with confidence >= N (0 = show all)")
 
     p.add_argument("--header", action="append", help='Extra header (repeatable): "Key: Value"')
     p.add_argument("--headers-json", help="JSON file with headers dict")
@@ -2687,9 +5336,17 @@ def main():
     p.add_argument("--authz-show-response", action="store_true", help="AuthZ audit: store a small response snippet in results/report")
     p.add_argument("--authz-response-chars", type=int, default=900, help="How many chars of response snippet to include")
 
-    # Optional local AI (Ollama)
-    p.add_argument("--ai-ollama", action="store_true", help="Use local Ollama to summarize each route (optional)")
-    p.add_argument("--ai-model", default="llama3.1:8b", help="Ollama model name (example: llama3.1:8b)")
+    # AI analysis (Claude by default, Ollama legacy)
+    p.add_argument("--ai-ollama", action="store_true", help="Use local Ollama to summarize each route (optional, legacy)")
+    p.add_argument("--ai-js-extract", action="store_true", help="Use Claude/Ollama API to deeply analyze JS assets: endpoints, keys, Firebase, structure")
+    p.add_argument("--ai-provider", default=None, help="Force AI provider: claude, ollama, lm_studio o claude_code. Bypasses interactive menu.")
+    p.add_argument("--ai-api-key", default="", help="Anthropic (Claude) API key for --ai-js-extract analysis")
+    p.add_argument("--ollama-url", default="http://localhost:11434", help="URL de la API de Ollama (default: http://localhost:11434)")
+    p.add_argument("--ai-model", default="dolphin-llama3:latest", help="Model name for Ollama/LM Studio when aplica (default: dolphin-llama3:latest)")
+    p.add_argument("--claude-code-extra-prompt", default="", help="Texto extra para inyectar en el prompt de Claude Code.")
+    p.add_argument("--claude-code-prompt-file", default="", help="Archivo .txt/.md con instrucciones extra para Claude Code.")
+    p.add_argument("--claude-code-bin", default="claude", help="Binario/ejecutable de Claude Code (default: claude)")
+    p.add_argument("--claude-code-timeout", type=int, default=180, help="Timeout en segundos para la ejecución de Claude Code (default: 180)")
 
     # Deep endpoints
     p.add_argument("--deep-endpoints", action="store_true",
@@ -2716,6 +5373,28 @@ def main():
     p.add_argument("--probe-firebase", action="store_true", help="Probe Firebase for open RTDB/Firestore/Storage (active, off by default)")
 
     args = p.parse_args()
+
+    if args.reset_ai_prefs:
+        ok = _reset_ai_prefs()
+        if ok:
+            print(f"{Fore.GREEN}[+] Preferencias AI borradas.")
+            return
+        print(f"{Fore.RED}[!] No se pudieron borrar las preferencias AI.")
+        return
+
+    # Reuse last AI provider/model/IP when user did not pass them explicitly.
+    apply_saved_ai_defaults(args)
+
+    # --report-from-json: regenerar HTML sin escanear
+    if args.report_from_json:
+        import sys
+        sys.exit(_cmd_report_from_json(args.report_from_json, getattr(args, "template", None)))
+
+    if not args.url:
+        p.error("Se requiere una URL objetivo o usa --report-from-json <path>")
+
+    # Interactive setup
+    interactive_ai_setup(args)
 
     if args.audit_authz_limit is not None:
         args.authz_max_routes = args.audit_authz_limit
@@ -2748,7 +5427,16 @@ def main():
         authz_response_chars=args.authz_response_chars,
 
         ai_ollama=args.ai_ollama,
+        ai_provider=getattr(args, "ai_provider", "claude"),
+        ai_js_extract=args.ai_js_extract,
         ai_model=args.ai_model,
+        ai_api_key=args.ai_api_key,
+        claude_code_extra_prompt=args.claude_code_extra_prompt,
+        claude_code_prompt_file=args.claude_code_prompt_file,
+        claude_code_bin=args.claude_code_bin,
+        claude_code_timeout=args.claude_code_timeout,
+        lm_studio_url=getattr(args, "lm_studio_url", ""),
+        ollama_url=getattr(args, "ollama_url", "http://localhost:11434"),
 
         deep_endpoints=args.deep_endpoints,
 
@@ -2759,6 +5447,10 @@ def main():
         fuzz_threads=args.fuzz_threads,
         google_dorks=not args.no_dorks,
         probe_firebase=args.probe_firebase,
+
+        # v4.5
+        probe_sitemap=not args.no_sitemap,
+        min_confidence=args.min_confidence,
 
         threads=args.threads,
         asset_threads=args.asset_threads,
@@ -3102,6 +5794,12 @@ function build(){
   <!-- NOTES -->
   ${buildNotes()}
 
+  <!-- REACTSCAN -->
+  ${buildReactScan()}
+
+  <!-- AI EXTRACTION -->
+  ${buildAiExtraction()}
+
   <footer>
     <b>DarkmLens</b> · Darkmoon Security Reporting · Uso autorizado únicamente
   </footer>
@@ -3122,6 +5820,89 @@ function build(){
   /* gallery filter */
   setupGalleryFilter();
 }
+
+/* ─── REACTSCAN ─── */
+function buildReactScan(){
+  const rs=RESULTS.reactscan||{};
+  if(!rs.enabled)return '';
+
+  function rsItems(items){
+    if(!items||!items.length)return '<p class="muted">Sin resultados.</p>';
+    const colorMap={critical:'var(--red)',high:'var(--orange)',info:'var(--blue)',low:'var(--muted)',success:'var(--green)'};
+    const labelMap={critical:'CRÍTICO',high:'ALTO',info:'INFO',low:'BAJO',success:'OK'};
+    return items.map(it=>{
+      const t=it.type||'info';
+      const col=colorMap[t]||'var(--muted)';
+      const lbl=labelMap[t]||t.toUpperCase();
+      return `<div style="border-left:4px solid ${col};padding:12px 16px;margin-bottom:10px;background:rgba(255,255,255,0.02);border-radius:0 8px 8px 0;">
+        <span style="background:${col};color:#fff;padding:2px 8px;border-radius:4px;font-size:11px;font-weight:700;margin-right:10px;">${lbl}</span>
+        <span style="font-size:13px;line-height:1.6;">${it.msg||''}</span>
+      </div>`;
+    }).join('');
+  }
+
+  const tech=rs.tech_results||[];
+  const libs=rs.libs_results||[];
+  const files=rs.files_results||[];
+  const maps=rs.map_results||[];
+  const cves=rs.cve_results||[];
+  const active=rs.active_cve_results||[];
+
+  const critCount=[...libs,...files,...maps,...cves,...active].filter(r=>r.type==='critical').length;
+  const highCount=[...libs,...files,...maps,...cves,...active].filter(r=>r.type==='high').length;
+
+  return `
+  <div class="section">
+    <div class="section-h">
+      <div class="section-title"><span class="ico ico-red">🔬</span>ReactScan — Seguridad React/Next.js</div>
+      <span class="count-badge">${critCount > 0 ? `<span style="color:var(--red);font-weight:700;">${critCount} crítico(s)</span>` : ''} ${highCount > 0 ? `· <span style="color:var(--orange);">${highCount} alto(s)</span>` : ''}</span>
+    </div>
+
+    <div class="grid2">
+      <!-- Tech -->
+      <div class="card">
+        <div class="card-h"><h2>🛠️ Tecnologías Detectadas</h2></div>
+        <div class="card-b">${rsItems(tech)}</div>
+      </div>
+
+      <!-- Sensitive Files -->
+      <div class="card">
+        <div class="card-h"><h2>📁 Archivos Sensibles</h2></div>
+        <div class="card-b">${files.length?rsItems(files):'<p class="muted">No se encontraron archivos sensibles expuestos.</p>'}</div>
+      </div>
+    </div>
+
+    <!-- Libraries & CVEs -->
+    <div class="card" style="margin-top:16px;">
+      <div class="card-h"><h2>📦 Librerías y Vulnerabilidades (OSV.dev)</h2></div>
+      <div class="card-b">${rsItems(libs)}</div>
+    </div>
+
+    <!-- CVE Passive -->
+    ${cves.length?`<div class="card" style="margin-top:16px;">
+      <div class="card-h"><h2>🚨 CVEs Conocidos Next.js/React (Pasivo)</h2></div>
+      <div class="card-b">${rsItems(cves)}</div>
+    </div>`:''}
+
+    <!-- Active CVE Tests -->
+    ${active.length?`<div class="card" style="margin-top:16px;border-color:rgba(255,77,109,0.25);">
+      <div class="card-h" style="background:rgba(255,77,109,0.04);"><h2>🧪 Verificación Activa de CVEs</h2></div>
+      <div class="card-b">
+        <div style="background:rgba(255,170,0,0.07);border-left:4px solid var(--orange);padding:10px 14px;border-radius:4px;margin-bottom:12px;font-size:12px;">
+          ⚠️ Modo activo: pruebas confirmatorias. Solo usar en sistemas con autorización explícita.
+        </div>
+        ${rsItems(active)}
+      </div>
+    </div>`:''}
+
+    <!-- Source Maps -->
+    ${maps.length?`<div class="card" style="margin-top:16px;">
+      <div class="card-h"><h2>🔍 Exposición de Código Fuente (Source Maps)</h2></div>
+      <div class="card-b">${rsItems(maps)}</div>
+    </div>`:''}
+  </div>`;
+}
+
 
 /* ─── STACK ─── */
 function buildStack(stack){
@@ -3180,6 +5961,15 @@ function buildFirebase(fb){
     configHtml=`<div class="sep"></div><div class="pre">${esc((fb.configs[0].blob||'').slice(0,800))}</div>`;
   }
 
+  const hints=(fb.hints||[]);
+  let hintsHtml='';
+  if(hints.length && !parsed.length && !(fb.configs&&fb.configs.length)){
+    hintsHtml=`<div class="sep"></div><div style="font-size:11px;color:var(--muted);margin-bottom:8px;font-weight:600;text-transform:uppercase">Evidencia de Firebase (Referencias en código)</div>
+    <ul style="font-size:12px;margin-left:14px;color:var(--orange)">
+      ${hints.slice(0,10).map(h=>`<li>Encontrado <code>${esc(h.match)}</code> en <span class="t-mini">${esc(h.found_in)}</span></li>`).join('')}
+    </ul>`;
+  }
+
   let colsHtml='';
   if(cols.length){
     const rows2=cols.map(c=>[
@@ -3199,6 +5989,7 @@ function buildFirebase(fb){
     </div>
     <div class="fb-card">
       <div class="fb-title">🔥 Firebase detectado</div>
+      ${hintsHtml}
       ${configHtml}
       ${colsHtml}
       ${rtdb.length?`<div class="sep"></div><div style="font-size:11px;color:var(--muted);margin-bottom:8px;font-weight:600;text-transform:uppercase">Realtime DB</div><ul style="font-size:12px">${rtdb.slice(0,10).map(r=>`<li><a href="${esc(r.url||'')}" target="_blank">${esc(r.url||'')}</a></li>`).join('')}</ul>`:''}
@@ -3458,24 +6249,64 @@ function buildGoogleDorks(){
   const gd=RESULTS.google_dorks||{};
   const queries=gd.queries||[];
   if(!queries.length)return '';
-  const cats=[...new Set(queries.map(q=>q.category))];
-  const rows=queries.map(q=>[
-    badge(q.category||'','badge-purple'),
-    `<code>${esc(q.dork||'')}</code>`,
-    esc(q.description||''),
-    `<a href="${esc(q.google_url||'')}" target="_blank" rel="noopener">Buscar 🔗</a>`,
-  ]);
+  const ipBlocked = gd.ip_blocked === true;
+
+  const rows=queries.map(q=>{
+    let fStatus = '';
+    if(q.found === true){
+       fStatus = '<span style="color:var(--green);font-weight:bold;">[+] Encontrado</span>';
+    } else if(q.found === false){
+       fStatus = '<span style="color:var(--muted);">[-] Sin resultados</span>';
+    } else if(q.found === 'blocked'){
+       fStatus = '<span style="color:var(--red);font-weight:bold;">🚫 IP Bloqueada</span>';
+    } else if(q.found === 'skipped'){
+       fStatus = '<span style="color:var(--muted);font-style:italic;">⏭ Omitida (IP bloqueada)</span>';
+    } else {
+       fStatus = '<span style="color:var(--orange);">[!] Error</span>';
+    }
+    return [
+      badge(q.category||'','badge-purple'),
+      `<code style="font-size:11px;">${esc(q.dork||'')}</code>`,
+      esc(q.description||''),
+      fStatus,
+      `<a href="${esc(q.google_url||'')}" target="_blank" rel="noopener" style="white-space:nowrap;">🔗 Buscar aquí</a>`,
+    ];
+  });
+
+  const foundCount = queries.filter(q => q.found === true).length;
+  const blockedCount = queries.filter(q => q.found === 'blocked').length;
+  const skippedCount = queries.filter(q => q.found === 'skipped').length;
+
+  const ipBlockBanner = ipBlocked ? `
+    <div style="background:rgba(255,77,109,0.10);border:1px solid rgba(255,77,109,0.35);border-radius:12px;padding:14px 18px;margin-bottom:16px;display:flex;align-items:flex-start;gap:12px;">
+      <span style="font-size:22px;flex-shrink:0;">🚫</span>
+      <div>
+        <b style="color:var(--red);font-size:14px;">IP Bloqueada por Google — Búsqueda Automática Detenida</b>
+        <p style="color:var(--muted);font-size:12px;margin-top:4px;">
+          Google bloqueó la IP tras ${blockedCount} intento(s) consecutivos. Se omitieron ${skippedCount} dork(s) restantes.
+          <br>Usa los enlaces <b>🔗 Buscar aquí</b> de la tabla para ejecutar cada búsqueda manualmente desde tu navegador.
+        </p>
+      </div>
+    </div>` : '';
+
   return `
   <div class="section">
     <div class="section-h">
-      <div class="section-title"><span class="ico ico-green">🌐</span>Google Dorks</div>
-      <span class="count-badge">Mostrando <b id="dorkCount">${queries.length}</b> queries · ${cats.length} categorías · Dominio: <b>${esc(gd.domain||'')}</b></span>
+      <div class="section-title"><span class="ico ico-green">🌐</span>Google Dorks${ipBlocked?' <span style="color:var(--red);font-size:12px;">(⚠ IP bloqueada)</span>':''}</div>
+      <span class="count-badge">
+        <b id="dorkCount">${queries.length}</b> queries ·
+        <span style="color:var(--green);font-weight:bold;">${foundCount} con resultados</span>
+        ${blockedCount?`· <span style="color:var(--red);">${blockedCount} bloqueadas</span>`:''}
+        ${skippedCount?`· <span style="color:var(--muted);">${skippedCount} omitidas</span>`:''}
+        · Dominio: <b>${esc(gd.domain||'')}</b>
+      </span>
     </div>
+    ${ipBlockBanner}
     <div class="controls">
       <input id="dorkSearch" class="search" placeholder="Buscar dork, categoría..."/>
     </div>
-    ${tbl(['Categoría','Dork Query','Descripción','Acción'],rows,'dorkTable')}
-    <div class="muted" style="margin-top:8px">💡 Los dorks se generan localmente (pasivo). Haz clic en "Buscar" para ejecutarlos en Google.</div>
+    ${tbl(['Categoría','Dork Query','Descripción','Estado','Enlace Manual'],rows,'dorkTable')}
+    <div class="muted" style="margin-top:8px">💡 Haz clic en <b>🔗 Buscar aquí</b> para abrir cada dork en Google. Los enlaces funcionan aunque la búsqueda automática haya sido bloqueada.</div>
   </div>`;
 }
 
@@ -3619,6 +6450,62 @@ function setupGalleryFilter(){
     if(galCount)galCount.textContent=String(n)+' capturas';
   }
   galSearch.addEventListener('input',apply);
+}
+
+/* ─── AI EXTRACTION ─── */
+function buildAiExtraction(){
+  const ai=RESULTS.ai_extraction||{};
+  if((!ai.api_calls || !ai.api_calls.length) && (!ai.other_findings || !ai.other_findings.length) && (!ai.base_urls || !ai.base_urls.length)) return '';
+  let html = `<div class="section"><div class="section-h"><div class="section-title"><span class="ico ico-purple">🤖</span>Análisis IA del Backend (Claude/Ollama/LM Studio)</div></div>`;
+  if(ai.backend_structure) {
+    html += `<div class="card" style="margin-bottom:16px"><div class="card-b"><p><strong>Estructura y Clasificación:</strong> ${esc(ai.backend_structure)}</p></div></div>`;
+  }
+  if(ai.base_urls && ai.base_urls.length) {
+    const cols0 = ['URL Base','Descripción', 'Archivo Origen'];
+    const rows0 = ai.base_urls.map(b => [
+      `<code style="color:var(--green);font-weight:bold;">${esc(b.url)}</code>`,
+      esc(b.description||''),
+      esc(b.source_file||'')
+    ]);
+    html += '<h3 style="margin-bottom:8px;font-size:14px;color:var(--green);">URLs de Backend Descubiertas</h3><div class="card" style="margin-bottom:16px"><div class="card-b">' + tbl(cols0, rows0, 'aiBaseUrlsTable') + '</div></div>';
+  }
+  if(ai.firebase_config_reconstructed) {
+    html += `<h3 style="margin-bottom:8px;font-size:14px;color:var(--orange);">Conexión a Firebase Detectada</h3><div class="card" style="margin-bottom:16px"><div class="card-b"><pre style="margin:0;font-size:13px;color:var(--accent);"><code>${esc(ai.firebase_config_reconstructed)}</code></pre></div></div>`;
+  }
+  if(ai.api_calls && ai.api_calls.length) {
+    const cols = ['URL / Ruta','Método','Payload / Parámetros','Ejemplo de Petición'];
+        const rows = ai.api_calls
+            .filter(api => api && (api.url || api.method || api.payload || api.sample_request))
+            .map(api => [
+                `<code style="white-space:pre-wrap;display:block;max-width:320px;overflow-x:auto;">${esc(api.url||'—')}</code>`,
+                badge(api.method||'—', api.method ? 'badge-blue' : 'badge-gray'),
+                `<code style="white-space:pre-wrap;display:block;max-width:300px;overflow-x:auto;">${esc(api.payload||'—')}</code>`,
+                `<code style="white-space:pre-wrap;display:block;max-width:300px;overflow-x:auto;">${esc(api.sample_request||'—')}</code>`
+            ]);
+    html += '<h3 style="margin-bottom:8px;font-size:14px;color:var(--accent);">Llamadas a API Extraídas</h3><div class="card" style="margin-bottom:16px"><div class="card-b">' + tbl(cols, rows, 'aiTable') + '</div></div>';
+  }
+  if(ai.other_findings && ai.other_findings.length) {
+        const cols2 = ['Tipo','Valor / Endpoint','Detalle / Fuente'];
+        const rows2 = ai.other_findings
+            .filter(f => f && (f.type || f.endpoint || f.value || f.name || f.config || f.description || f.method))
+            .map(f => {
+                const typeLabel = f.type || (f.endpoint ? 'Endpoint' : f.name ? 'Key' : f.method ? 'API' : 'Hallazgo');
+                const valueLabel = f.value || f.endpoint || f.name || f.config || '—';
+                const detailParts = [];
+                if (f.method) detailParts.push(`Method: ${f.method}`);
+                if (f.description) detailParts.push(f.description);
+                if (f.config && f.config !== valueLabel) detailParts.push(`Config: ${f.config}`);
+                if (f.source_file) detailParts.push(`Source: ${f.source_file}`);
+                return [
+                    badge(typeLabel,'badge-orange'),
+                    `<code style="white-space:pre-wrap;display:block;max-width:400px;overflow-x:auto;color:var(--yellow);">${esc(valueLabel)}</code>`,
+                    esc(detailParts.join(' · ') || '—')
+                ];
+            });
+    html += '<h3 style="margin-bottom:8px;font-size:14px;color:var(--orange);">Otros Hallazgos (Keys, Firebase, etc)</h3><div class="card fb-card" style="margin-bottom:16px"><div class="card-b">' + tbl(cols2, rows2, 'aiOthersTable') + '</div></div>';
+  }
+  html += `</div>`;
+  return html;
 }
 
 build();
